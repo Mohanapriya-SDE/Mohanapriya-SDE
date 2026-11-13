@@ -1,0 +1,6 @@
+@KredFlow.Api_HostAddress = http://localhost:5208
+
+GET {{KredFlow.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/KredFlow.Api/KredFlow.Api.csproj" />
+    <Project Path="src/KredFlow.Application/KredFlow.Application.csproj" />
+    <Project Path="src/KredFlow.Domain/KredFlow.Domain.csproj" />
+    <Project Path="src/KredFlow.Infrastructure/KredFlow.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/KredFlow.Tests/KredFlow.Tests.csproj" />
+  </Folder>
+</Solution>
