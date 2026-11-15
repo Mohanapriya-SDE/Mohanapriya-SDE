@@ -9,10 +9,10 @@ Built with ASP.NET Core (.NET 10), EF Core 10, PostgreSQL, ASP.NET Core Identity
 | Area | State |
 |---|---|
 | Authentication (`register`, `login`, `me`) | Implemented |
+| Lender profile (`GET`/`PUT /lenders/me`) and deactivation | Implemented |
 | Domain model, migrations, development seed data | Implemented |
 | Customer, Loan, Payment and Reporting APIs | Not started |
 | Refresh tokens and logout | Not started |
-| Lender profile endpoints (`/lenders/me`) | Not started |
 
 ## Solution layout
 
@@ -101,6 +101,7 @@ All settings live in [src/KredFlow.Api/appsettings.json](src/KredFlow.Api/appset
 | `Jwt:Audience` | `KredFlowClient` | Token audience. |
 | `Jwt:AccessTokenExpiryMinutes` | `15` | Access token lifetime. |
 | `Jwt:SigningKey` | none (required) | HS256 key, at least 32 characters. Secret. |
+| `Lenders:SupportedTimeZones` | `["Asia/Kolkata"]` | Time zone ids a lender may choose. Must include `Asia/Kolkata` (the registration default) and only ids known to the host OS; the app fails to start otherwise. |
 | `RateLimiting:Login:PermitLimit` / `WindowSeconds` | `5` / `60` | Login attempts per client IP. |
 | `RateLimiting:Register:PermitLimit` / `WindowSeconds` | `3` / `600` | Registrations per client IP. |
 
@@ -210,6 +211,60 @@ An HS256 JWT with these claims:
 
 On every request the API also checks that the user and lender are still active, so deactivating an account takes effect immediately instead of when the token expires. Access tokens cannot be revoked individually; they are short-lived by design.
 
+## Lender API
+
+The caller's lender is taken from the token's `lenderId` claim, so there is no lender id in the URL. A lender is created by [registration](#register), not by this API.
+
+| Method and path | Role | Success | Failure |
+|---|---|---|---|
+| `GET /api/v1/lenders/me` | Any user of the lender | `200 OK` | `401` |
+| `PUT /api/v1/lenders/me` | `Owner` | `200 OK` | `400`, `401`, `403` |
+| `PATCH /api/v1/lenders/me/status` | `Owner` | `204 No Content` | `401`, `403`, `422` |
+
+`LenderResponse`:
+
+```json
+{
+  "id": "7b2a...",
+  "businessName": "ABC Finance",
+  "ownerName": "Ravi Kumar",
+  "email": "ravi@example.com",
+  "phoneNumber": "+919876543210",
+  "address": "Bangalore",
+  "timeZone": "Asia/Kolkata",
+  "isActive": true,
+  "createdAt": "2026-11-12T10:00:00Z"
+}
+```
+
+### Update profile
+
+`PUT /api/v1/lenders/me` replaces the four editable fields. `email` and `ownerName` cannot be changed here.
+
+```json
+{
+  "businessName": "Sri Lakshmi Finance",
+  "phoneNumber": "9876543210",
+  "address": "Chennai",
+  "timeZone": "Asia/Kolkata"
+}
+```
+
+| Field | Rule |
+|---|---|
+| `businessName` | Required, max 200 characters |
+| `phoneNumber` | Indian mobile number, optional `+91`; stored as `+91XXXXXXXXXX` |
+| `address` | Optional, max 500 characters |
+| `timeZone` | Required; must be one of `Lenders:SupportedTimeZones` |
+
+### Deactivate
+
+`PATCH /api/v1/lenders/me/status` with `{ "isActive": false }` deactivates the lender. Nothing is deleted: customers, loans, payments and transactions are kept.
+
+- From then on, every user of the lender gets `401` on login and on any existing token.
+- Reactivation is not available through the API (an inactive lender cannot authenticate), so `{ "isActive": true }` returns `422`. Reactivate by setting `Lenders.IsActive` back to `true` in the database.
+- Deactivation returns `422` while the lender still has `Active` or `Overdue` loans.
+
 ## Error responses
 
 Errors use `application/problem+json` (RFC 9457) with a `traceId` for log correlation.
@@ -289,7 +344,8 @@ dotnet test KredFlow.slnx
 
 - `DatabaseSeederTests` covers the seed data and its determinism.
 - `AuthApiTests` runs the real API over HTTP against in-memory Sqlite: registration, duplicate emails, validation, login claims, uniform `401` failures, lockout, `me`, and rejection of tokens after a lender is deactivated.
-- `AuthEdgeCaseTests` covers rate limiting, startup without a signing key, transaction rollback, phone normalization and the password policy.
+- `AuthEdgeCaseTests` covers rate limiting, startup with a missing signing key or invalid time zone list, transaction rollback, phone normalization and the password policy.
+- `LenderApiTests` covers the lender profile: read, update, owner-only access, and deactivation (including blocked access afterwards, kept data, and the open-loan rule).
 
 Integration tests run with the `Testing` environment, which skips the Development migrate-and-seed step. The tests create the schema with `EnsureCreated`, because the migrations are specific to PostgreSQL.
 
@@ -297,5 +353,5 @@ Integration tests run with the `Testing` environment, which skips the Developmen
 
 - Customer, Loan, Payment and Reporting endpoints, with all queries scoped to the caller's `lenderId`
 - Refresh tokens (hashed at rest, rotated on use) and logout
-- Lender profile endpoints: `GET` and `PUT /api/v1/lenders/me`, and deactivation
+- Staff user management for a lender
 - Business-date calculations in the lender's time zone

@@ -27,4 +27,29 @@ Content-Type: application/json
 GET {{KredFlow.Api_HostAddress}}/api/v1/auth/me
 Authorization: Bearer {{accessToken}}
 
+### Lender profile
+GET {{KredFlow.Api_HostAddress}}/api/v1/lenders/me
+Authorization: Bearer {{accessToken}}
+
+### Update lender profile (Owner only)
+PUT {{KredFlow.Api_HostAddress}}/api/v1/lenders/me
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "businessName": "Sri Lakshmi Finance",
+  "phoneNumber": "9876543210",
+  "address": "Chennai",
+  "timeZone": "Asia/Kolkata"
+}
+
+### Deactivate lender (Owner only; irreversible through the API)
+PATCH {{KredFlow.Api_HostAddress}}/api/v1/lenders/me/status
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "isActive": false
+}
+
 ###

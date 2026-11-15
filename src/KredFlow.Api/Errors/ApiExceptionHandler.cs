@@ -31,6 +31,12 @@ public class ApiExceptionHandler(IProblemDetailsService problemDetails) : IExcep
                 Title = "Conflict.",
                 Detail = ex.Message
             },
+            BusinessRuleException ex => new ProblemDetails
+            {
+                Status = StatusCodes.Status422UnprocessableEntity,
+                Title = "Business rule violation.",
+                Detail = ex.Message
+            },
             _ => null
         };
 

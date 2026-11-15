@@ -1,6 +1,9 @@
+using KredFlow.Domain.Constants;
 using KredFlow.Domain.Entities;
+using KredFlow.Domain.Enums;
 using KredFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Data.Sqlite;
@@ -74,6 +77,53 @@ public class ApiFactory : WebApplicationFactory<Program>
             return await db.SaveChangesAsync();
         });
 
+    public async Task AddStaffUserAsync(Guid lenderId, string email, string password)
+    {
+        using var scope = Services.CreateScope();
+        var users = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+        var user = new ApplicationUser
+        {
+            Id = Guid.NewGuid(),
+            LenderId = lenderId,
+            UserName = email,
+            Email = email,
+            FullName = "Staff Member",
+            IsActive = true,
+            CreatedAt = DateTime.UtcNow
+        };
+
+        ThrowIfFailed(await users.CreateAsync(user, password));
+        ThrowIfFailed(await users.AddToRoleAsync(user, RoleNames.Staff));
+    }
+
+    public async Task AddLoanAsync(Guid lenderId, LoanStatus status) =>
+        await WithDbAsync(async db =>
+        {
+            var customer = new Customer { Id = Guid.NewGuid(), LenderId = lenderId, FullName = "Test Customer", PhoneNumber = "+919876543210" };
+            db.Customers.Add(customer);
+            db.Loans.Add(new Loan
+            {
+                Id = Guid.NewGuid(),
+                LenderId = lenderId,
+                CustomerId = customer.Id,
+                Principal = 10_000m,
+                AnnualInterestRate = 12m,
+                TenureMonths = 12,
+                EmiAmount = 900m,
+                StartDate = DateOnly.FromDateTime(DateTime.UtcNow),
+                Status = status
+            });
+            return await db.SaveChangesAsync();
+        });
+
+    private static void ThrowIfFailed(IdentityResult result)
+    {
+        if (!result.Succeeded)
+        {
+            throw new InvalidOperationException(string.Join("; ", result.Errors.Select(e => e.Description)));
+        }
+    }
+
     protected override void Dispose(bool disposing)
     {
         base.Dispose(disposing);
@@ -92,6 +142,19 @@ public sealed class LowLoginLimitApiFactory : ApiFactory
         {
             var settings = base.Settings;
             settings["RateLimiting:Login:PermitLimit"] = "2";
+            return settings;
+        }
+    }
+}
+
+public sealed class UnknownTimeZoneApiFactory : ApiFactory
+{
+    protected override Dictionary<string, string?> Settings
+    {
+        get
+        {
+            var settings = base.Settings;
+            settings["Lenders:SupportedTimeZones:0"] = "Nowhere/Land";
             return settings;
         }
     }

@@ -9,6 +9,9 @@ public class UnitOfWork(KredFlowDbContext db) : IUnitOfWork
 {
     private const string UniqueViolationSqlState = "23505";
 
+    public Task SaveChangesAsync(CancellationToken cancellationToken = default) =>
+        db.SaveChangesAsync(cancellationToken);
+
     public async Task ExecuteInTransactionAsync(Func<CancellationToken, Task> action, CancellationToken cancellationToken = default)
     {
         try

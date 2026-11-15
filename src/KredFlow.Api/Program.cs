@@ -4,6 +4,7 @@ using KredFlow.Api.Errors;
 using KredFlow.Api.RateLimiting;
 using KredFlow.Application;
 using KredFlow.Application.Interfaces;
+using KredFlow.Application.Lenders;
 using KredFlow.Infrastructure;
 using KredFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -46,6 +47,13 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ICurrentUserService, CurrentUserService>();
 builder.Services.AddSingleton<IJwtTokenService, JwtTokenService>();
 builder.Services.AddAuthRateLimiting();
+
+builder.Services.AddOptions<LenderOptions>()
+    .BindConfiguration(LenderOptions.SectionName)
+    .Validate(
+        options => options.IsValid(),
+        "Lenders:SupportedTimeZones must be non-empty, contain 'Asia/Kolkata' and list only time zones known to this machine.")
+    .ValidateOnStart();
 
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(

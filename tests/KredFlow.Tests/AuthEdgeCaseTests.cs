@@ -35,6 +35,14 @@ public sealed class AuthEdgeCaseTests
     }
 
     [Fact]
+    public void Startup_WithInvalidSupportedTimeZones_Fails()
+    {
+        using var factory = new UnknownTimeZoneApiFactory();
+
+        Assert.ThrowsAny<Exception>(() => factory.CreateClient());
+    }
+
+    [Fact]
     public async Task ExecuteInTransaction_WhenActionThrows_RollsBackEverything()
     {
         await using var connection = new SqliteConnection("DataSource=:memory:");
