@@ -1,0 +1,53 @@
+using FluentValidation;
+using KredFlow.Application.Exceptions;
+using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.Mvc;
+
+namespace KredFlow.Api.Errors;
+
+/// <summary>Maps application exceptions to RFC 9457 problem responses; anything else falls through to a generic 500.</summary>
+public class ApiExceptionHandler(IProblemDetailsService problemDetails) : IExceptionHandler
+{
+    public async ValueTask<bool> TryHandleAsync(HttpContext httpContext, Exception exception, CancellationToken cancellationToken)
+    {
+        ProblemDetails? problem = exception switch
+        {
+            ValidationException ex => new HttpValidationProblemDetails(
+                ex.Errors.GroupBy(e => ToCamelCase(e.PropertyName))
+                    .ToDictionary(g => g.Key, g => g.Select(e => e.ErrorMessage).ToArray()))
+            {
+                Status = StatusCodes.Status400BadRequest,
+                Title = "One or more validation errors occurred."
+            },
+            AuthenticationFailedException ex => new ProblemDetails
+            {
+                Status = StatusCodes.Status401Unauthorized,
+                Title = "Authentication failed.",
+                Detail = ex.Message
+            },
+            ConflictException ex => new ProblemDetails
+            {
+                Status = StatusCodes.Status409Conflict,
+                Title = "Conflict.",
+                Detail = ex.Message
+            },
+            _ => null
+        };
+
+        if (problem is null)
+        {
+            return false;
+        }
+
+        httpContext.Response.StatusCode = problem.Status!.Value;
+        return await problemDetails.TryWriteAsync(new ProblemDetailsContext
+        {
+            HttpContext = httpContext,
+            Exception = exception,
+            ProblemDetails = problem
+        });
+    }
+
+    private static string ToCamelCase(string name) =>
+        string.IsNullOrEmpty(name) ? name : char.ToLowerInvariant(name[0]) + name[1..];
+}

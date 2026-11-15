@@ -2,16 +2,22 @@ using Bogus;
 using KredFlow.Application.Interfaces;
 using KredFlow.Domain.Entities;
 using KredFlow.Domain.Enums;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 
 namespace KredFlow.Infrastructure.Persistence.Seed;
 
 /// <summary>
-/// Seeds 2 lenders, 10 customers and 15 loans with schedules, payments and transactions.
-/// Output is deterministic for a given date.
+/// Seeds 2 lenders (each with an owner login), 10 customers and 15 loans with schedules, payments and transactions.
+/// Output is deterministic for a given date. Development only: the owner password below is public.
 /// </summary>
-public class DatabaseSeeder(KredFlowDbContext db, TimeProvider? timeProvider = null) : IDatabaseSeeder
+public class DatabaseSeeder(
+    KredFlowDbContext db,
+    TimeProvider? timeProvider = null,
+    IPasswordHasher<ApplicationUser>? passwordHasher = null) : IDatabaseSeeder
 {
+    public const string DevOwnerPassword = "KredFlow@Dev2026!";
+
     private const int RandomSeed = 20260101;
     private const int CustomerCount = 10;
     private const int LoanCount = 15;
@@ -30,7 +36,7 @@ public class DatabaseSeeder(KredFlowDbContext db, TimeProvider? timeProvider = n
         var today = DateOnly.FromDateTime((timeProvider ?? TimeProvider.System).GetUtcNow().UtcDateTime);
         var faker = new Faker("en_IND") { Random = new Randomizer(RandomSeed) };
 
-        var lenders = CreateLenders(faker);
+        var lenders = CreateLenders(faker, today);
         var customers = CreateCustomers(faker, lenders);
 
         var loans = new List<Loan>();
@@ -46,6 +52,7 @@ public class DatabaseSeeder(KredFlowDbContext db, TimeProvider? timeProvider = n
         }
 
         db.Lenders.AddRange(lenders);
+        AddOwnerUsers(lenders);
         db.Customers.AddRange(customers);
         db.Loans.AddRange(loans);
         db.RepaymentSchedules.AddRange(schedules);
@@ -56,11 +63,62 @@ public class DatabaseSeeder(KredFlowDbContext db, TimeProvider? timeProvider = n
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    private static List<Lender> CreateLenders(Faker faker) =>
-    [
-        new() { Id = faker.Random.Guid(), Name = "Annapoorna Finance", Email = "contact@annapoorna-finance.example" },
-        new() { Id = faker.Random.Guid(), Name = "Lakshmi Micro Credit", Email = "hello@lakshmi-microcredit.example" }
-    ];
+    private static List<Lender> CreateLenders(Faker faker, DateOnly today)
+    {
+        var createdAt = today.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+        return
+        [
+            new()
+            {
+                Id = faker.Random.Guid(),
+                BusinessName = "Annapoorna Finance",
+                OwnerName = "Annapoorna Devi",
+                Email = "contact@annapoorna-finance.example",
+                PhoneNumber = "+919876500001",
+                Address = "Chennai",
+                CreatedAt = createdAt
+            },
+            new()
+            {
+                Id = faker.Random.Guid(),
+                BusinessName = "Lakshmi Micro Credit",
+                OwnerName = "Lakshmi Narayanan",
+                Email = "hello@lakshmi-microcredit.example",
+                PhoneNumber = "+919876500002",
+                Address = "Bangalore",
+                CreatedAt = createdAt
+            }
+        ];
+    }
+
+    private void AddOwnerUsers(List<Lender> lenders)
+    {
+        var hasher = passwordHasher ?? new PasswordHasher<ApplicationUser>();
+        foreach (var lender in lenders)
+        {
+            var user = new ApplicationUser
+            {
+                Id = Guid.NewGuid(),
+                LenderId = lender.Id,
+                UserName = lender.Email,
+                NormalizedUserName = lender.Email.ToUpperInvariant(),
+                Email = lender.Email,
+                NormalizedEmail = lender.Email.ToUpperInvariant(),
+                EmailConfirmed = true,
+                PhoneNumber = lender.PhoneNumber,
+                FullName = lender.OwnerName,
+                IsActive = true,
+                LockoutEnabled = true,
+                SecurityStamp = Guid.NewGuid().ToString("N"),
+                ConcurrencyStamp = Guid.NewGuid().ToString("N"),
+                CreatedAt = lender.CreatedAt
+            };
+            user.PasswordHash = hasher.HashPassword(user, DevOwnerPassword);
+
+            db.Users.Add(user);
+            db.UserRoles.Add(new IdentityUserRole<Guid> { UserId = user.Id, RoleId = KredFlowDbContext.OwnerRoleId });
+        }
+    }
 
     private static List<Customer> CreateCustomers(Faker faker, List<Lender> lenders)
     {

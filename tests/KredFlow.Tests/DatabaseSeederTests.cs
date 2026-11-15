@@ -1,7 +1,9 @@
 using Bogus;
+using KredFlow.Domain.Entities;
 using KredFlow.Domain.Enums;
 using KredFlow.Infrastructure.Persistence;
 using KredFlow.Infrastructure.Persistence.Seed;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
@@ -63,6 +65,28 @@ public sealed class DatabaseSeederTests : IDisposable
         await seeder.SeedAsync();
 
         Assert.Equal(15, await _db.Loans.CountAsync());
+    }
+
+    [Fact]
+    public async Task SeedAsync_CreatesOwnerLoginPerLender()
+    {
+        await new DatabaseSeeder(_db).SeedAsync();
+
+        var users = await _db.Users.ToListAsync();
+        var hasher = new PasswordHasher<ApplicationUser>();
+
+        Assert.Equal(2, users.Count);
+        Assert.Equal(
+            await _db.Lenders.Select(l => l.Id).OrderBy(id => id).ToListAsync(),
+            users.Select(u => u.LenderId).OrderBy(id => id).ToList());
+        Assert.All(users, u =>
+        {
+            Assert.True(u.LockoutEnabled);
+            Assert.Equal(
+                PasswordVerificationResult.Success,
+                hasher.VerifyHashedPassword(u, u.PasswordHash!, DatabaseSeeder.DevOwnerPassword));
+        });
+        Assert.Equal(2, await _db.UserRoles.CountAsync(r => r.RoleId == KredFlowDbContext.OwnerRoleId));
     }
 
     [Fact]
