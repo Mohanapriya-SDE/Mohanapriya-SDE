@@ -18,6 +18,7 @@ public static class DependencyInjection
         services.AddDbContext<KredFlowDbContext>(options => options.UseNpgsql(connectionString));
         services.AddScoped<IDatabaseSeeder, DatabaseSeeder>();
         services.AddScoped<ILenderRepository, LenderRepository>();
+        services.AddScoped<ICustomerRepository, CustomerRepository>();
         services.AddScoped<IUnitOfWork, UnitOfWork>();
         services.TryAddSingleton(TimeProvider.System);
 

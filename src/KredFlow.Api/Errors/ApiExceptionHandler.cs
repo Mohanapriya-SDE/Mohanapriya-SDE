@@ -25,6 +25,12 @@ public class ApiExceptionHandler(IProblemDetailsService problemDetails) : IExcep
                 Title = "Authentication failed.",
                 Detail = ex.Message
             },
+            NotFoundException ex => new ProblemDetails
+            {
+                Status = StatusCodes.Status404NotFound,
+                Title = "Not found.",
+                Detail = ex.Message
+            },
             ConflictException ex => new ProblemDetails
             {
                 Status = StatusCodes.Status409Conflict,

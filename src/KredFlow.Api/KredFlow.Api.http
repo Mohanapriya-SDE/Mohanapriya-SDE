@@ -52,4 +52,55 @@ Content-Type: application/json
   "isActive": false
 }
 
+### Create customer
+# @name createCustomer
+POST {{KredFlow.Api_HostAddress}}/api/v1/customers
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "fullName": "Meena Devi",
+  "phoneNumber": "9123456789",
+  "address": "Chennai"
+}
+
+###
+@customerId = {{createCustomer.response.body.id}}
+
+### Get customer
+GET {{KredFlow.Api_HostAddress}}/api/v1/customers/{{customerId}}
+Authorization: Bearer {{accessToken}}
+
+### List/search customers
+GET {{KredFlow.Api_HostAddress}}/api/v1/customers?search=meena&isActive=true&page=1&pageSize=20
+Authorization: Bearer {{accessToken}}
+
+### Update customer
+PUT {{KredFlow.Api_HostAddress}}/api/v1/customers/{{customerId}}
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "fullName": "Meena Sundaram",
+  "phoneNumber": "9123456789",
+  "address": "Coimbatore"
+}
+
+### Deactivate customer (use true to reactivate)
+PATCH {{KredFlow.Api_HostAddress}}/api/v1/customers/{{customerId}}/status
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "isActive": false
+}
+
+### Customer loans
+GET {{KredFlow.Api_HostAddress}}/api/v1/customers/{{customerId}}/loans
+Authorization: Bearer {{accessToken}}
+
+### Customer outstanding
+GET {{KredFlow.Api_HostAddress}}/api/v1/customers/{{customerId}}/outstanding
+Authorization: Bearer {{accessToken}}
+
 ###

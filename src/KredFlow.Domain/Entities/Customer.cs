@@ -6,6 +6,9 @@ public class Customer
     public Guid LenderId { get; set; }
     public string FullName { get; set; } = string.Empty;
     public string PhoneNumber { get; set; } = string.Empty;
+    public string? Address { get; set; }
+    public bool IsActive { get; set; } = true;
+    public DateTime CreatedAt { get; set; }
 
     public Lender Lender { get; set; } = null!;
     public ICollection<Loan> Loans { get; set; } = new List<Loan>();

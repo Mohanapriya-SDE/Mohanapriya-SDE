@@ -37,7 +37,7 @@ public class DatabaseSeeder(
         var faker = new Faker("en_IND") { Random = new Randomizer(RandomSeed) };
 
         var lenders = CreateLenders(faker, today);
-        var customers = CreateCustomers(faker, lenders);
+        var customers = CreateCustomers(faker, lenders, today);
 
         var loans = new List<Loan>();
         var schedules = new List<RepaymentSchedule>();
@@ -120,8 +120,9 @@ public class DatabaseSeeder(
         }
     }
 
-    private static List<Customer> CreateCustomers(Faker faker, List<Lender> lenders)
+    private static List<Customer> CreateCustomers(Faker faker, List<Lender> lenders, DateOnly today)
     {
+        var createdAt = today.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
         var customers = new List<Customer>();
         for (var i = 0; i < CustomerCount; i++)
         {
@@ -130,7 +131,8 @@ public class DatabaseSeeder(
                 Id = faker.Random.Guid(),
                 LenderId = lenders[i % lenders.Count].Id,
                 FullName = faker.Name.FullName(),
-                PhoneNumber = $"+91{faker.Random.Int(6, 9)}{faker.Random.Int(0, 999_999_999):D9}"
+                PhoneNumber = $"+91{faker.Random.Int(6, 9)}{faker.Random.Int(0, 999_999_999):D9}",
+                CreatedAt = createdAt
             });
         }
 
