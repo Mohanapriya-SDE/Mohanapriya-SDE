@@ -248,6 +248,9 @@ public sealed class CustomerApiTests(ApiFactory factory) : IClassFixture<ApiFact
 
         Assert.Equal([newer, older], loans.Select(l => l.Id));
         Assert.Equal(LoanStatus.Active, loans[0].Status);
+
+        var raw = await (await SendAsync(HttpMethod.Get, $"{Base}/{customer.Id}/loans", session.Token)).Content.ReadAsStringAsync();
+        Assert.Contains("\"status\":\"Active\"", raw);
     }
 
     [Fact]

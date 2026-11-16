@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using KredFlow.Domain.Enums;
 
 namespace KredFlow.Application.Customers;
@@ -50,6 +51,8 @@ public class CustomerLoanResponse
     public int TenureMonths { get; set; }
     public decimal EmiAmount { get; set; }
     public DateOnly StartDate { get; set; }
+
+    [JsonConverter(typeof(JsonStringEnumConverter))]
     public LoanStatus Status { get; set; }
 }
 

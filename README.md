@@ -299,9 +299,91 @@ Every customer belongs to the caller's lender, taken from the token's `lenderId`
 | `phoneNumber` | Indian mobile number, optional `+91`; stored as `+91XXXXXXXXXX`. Not unique, so several customers may share a number |
 | `address` | Optional, max 500 characters |
 
-- **List:** `search` matches name (case-insensitive) or phone number; `isActive` filters by state; `page` starts at 1 and `pageSize` defaults to 20 (max 100). The response has `items`, `page`, `pageSize`, `totalCount` and `totalPages`.
-- **Status:** `PATCH .../status` with `{ "isActive": false }` deactivates a customer and `true` reactivates. Nothing is deleted; loans and payments are kept. Rejecting new loans for inactive customers is enforced when loan creation is added.
-- **Outstanding:** `{ customerId, openLoanCount, totalOutstanding }` over `Active` and `Overdue` loans. It is the schedule's `TotalDue` minus allocated payments; a loan with no schedule yet counts its principal.
+### Create and update
+
+`POST /api/v1/customers` takes the body below and returns `201` with a `CustomerResponse` and a `Location` header pointing at `GET /api/v1/customers/{id}`. `PUT /api/v1/customers/{customerId}` takes the same three fields, replaces all of them, and returns `200` with the updated `CustomerResponse`.
+
+```json
+{
+  "fullName": "Meena Devi",
+  "phoneNumber": "9123456789",
+  "address": "Chennai"
+}
+```
+
+- Input is trimmed. A blank `address` is stored as `null`.
+- A new customer is always active and always owned by the caller's lender. `lenderId`, `isActive` and `createdAt` in the body are ignored.
+- Phone numbers are not unique, so creating a second customer with the same number succeeds.
+
+### List and search
+
+`GET /api/v1/customers` returns only the caller's customers, ordered by name.
+
+| Query parameter | Default | Rule |
+|---|---|---|
+| `search` | none | Max 100 characters. Case-insensitive match on name, or a match on the stored phone number (for example `9333` or `+9193`) |
+| `isActive` | none (both) | `true` or `false` |
+| `page` | `1` | 1 or more |
+| `pageSize` | `20` | 1 to 100 |
+
+```json
+{
+  "items": [ { "id": "3f9c...", "fullName": "Anita Rao", "phoneNumber": "+919111111111", "address": "Chennai", "isActive": true, "createdAt": "2026-11-16T10:00:00Z" } ],
+  "page": 1,
+  "pageSize": 20,
+  "totalCount": 3,
+  "totalPages": 1
+}
+```
+
+An out-of-range `page` or `pageSize` returns `400`. A page past the end returns `200` with an empty `items` list.
+
+### Activate and deactivate
+
+`PATCH /api/v1/customers/{customerId}/status` with `{ "isActive": false }` deactivates and `{ "isActive": true }` reactivates. Both return `204`, and repeating the same request is harmless.
+
+- Nothing is deleted. Loans, payments and transactions of an inactive customer stay readable.
+- Deactivation is allowed while the customer has open loans (unlike lenders, which are blocked).
+- Rejecting new loans for an inactive customer is enforced when loan creation is added; the flag is already stored for it.
+
+### Loan history
+
+`GET /api/v1/customers/{customerId}/loans` returns a JSON array, newest `startDate` first. It includes loans of every status, and is empty for a customer with no loans.
+
+```json
+[
+  {
+    "id": "a1d4...",
+    "principal": 10000,
+    "annualInterestRate": 12,
+    "tenureMonths": 12,
+    "emiAmount": 900,
+    "startDate": "2026-01-01",
+    "status": "Active"
+  }
+]
+```
+
+### Outstanding
+
+`GET /api/v1/customers/{customerId}/outstanding`:
+
+```json
+{ "customerId": "3f9c...", "openLoanCount": 2, "totalOutstanding": 10900 }
+```
+
+- Only `Active` and `Overdue` loans count; `Closed` and `Defaulted` loans are excluded.
+- Per loan it is the sum of the schedule's `TotalDue` minus the allocated payments (interest plus principal), never below zero.
+- A loan with no repayment schedule yet counts its full principal.
+- A customer with no open loans returns `0` for both numbers.
+
+### Errors
+
+| Status | When |
+|---|---|
+| `400` | Blank or too long `fullName`, invalid `phoneNumber`, `address` over 500 characters, or an invalid list query. The body is a validation problem with an `errors` object keyed by field |
+| `401` | Missing, invalid or expired token |
+| `404` | The id does not exist **or belongs to another lender**. Both cases are deliberately identical, so ids cannot be probed across lenders |
 
 ## Error responses
 
@@ -557,13 +639,169 @@ SQL
 
 This removes every lender whose owner is `Ravi`. To remove one account, match on `"Email"` instead (stored in lower case). Do not run it against the seeded lenders, because the foreign keys will reject the delete.
 
+## Testing the customer API
+
+### Strategy
+
+| Layer | What it proves | How to run |
+|---|---|---|
+| Automated API tests (`CustomerApiTests`) | Real HTTP pipeline against in-memory Sqlite: validation, tenant isolation, search and paging, soft deactivation, loan history, outstanding maths | `dotnet test KredFlow.slnx --filter "FullyQualifiedName~CustomerApi"` |
+| Manual `curl` against PostgreSQL | The migration, real JSON shapes, and a seeded database with loans and payments | This section |
+| [KredFlow.Api.http](src/KredFlow.Api/KredFlow.Api.http) | The same requests in VS Code, with the customer id captured automatically | Run the requests in order |
+
+What to verify, in priority order:
+
+1. **Tenant isolation.** Another lender must get `404` on every customer endpoint, and the list must not include foreign customers. This is the most important check.
+2. **Authentication.** Every endpoint returns `401` without a token.
+3. **Validation.** Bad name, phone, address and paging values return `400` and nothing is saved.
+4. **Soft deactivation.** Deactivating never removes loans, and reactivating restores the customer.
+5. **Business rules.** Duplicate phone numbers are accepted, and `lenderId` in a body is ignored.
+6. **Outstanding.** Only `Active` and `Overdue` loans count, and payments reduce the total.
+
+### Setup
+
+Start the API as in [Testing authentication manually](#setup), then in a second terminal:
+
+```bash
+B=http://localhost:5208/api/v1
+J='Content-Type: application/json'
+P='StrongPassword@123'
+
+# Register a lender, log in, and print its token
+token() {
+  local email="$1"
+  curl -s -o /dev/null -X POST $B/auth/register -H "$J" \
+    -d '{"businessName":"ABC","ownerName":"Ravi","email":"'"$email"'","phoneNumber":"9876543210","password":"'"$P"'"}'
+  curl -s -X POST $B/auth/login -H "$J" -d '{"email":"'"$email"'","password":"'"$P"'"}' \
+    | sed -E 's/.*"accessToken":"([^"]+)".*/\1/'
+}
+
+TA=$(token "a$RANDOM@example.com")    # lender A
+TB=$(token "b$RANDOM@example.com")    # lender B, used to prove isolation
+```
+
+`token` is a shell function, so define it again in each new terminal. If `$TA` is empty, the API is not reachable or the login rate limit was hit; see the note in the auth setup.
+
+### 1. Create
+
+```bash
+R=$(curl -s -X POST $B/customers -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"fullName":"  Meena Devi  ","phoneNumber":"9123456789","address":"Chennai"}'); echo $R
+C=$(echo $R | sed -E 's/.*"id":"([^"]+)".*/\1/')
+```
+
+Expected: `201`, `fullName` trimmed to `Meena Devi`, `phoneNumber` `+919123456789`, `isActive` `true`. Add `-i` to see the `Location` header.
+
+| Scenario | Request body | Expected |
+|---|---|---|
+| Duplicate phone | Same `phoneNumber`, name `Lakshmi Devi` | `201` (phones are not unique) |
+| Body `lenderId` ignored | Add `"lenderId":"00000000-0000-0000-0000-000000000000"` | `201`, owned by the caller's lender |
+| Empty name | `"fullName":""` | `400`, `errors.fullName` |
+| Bad phone | `"phoneNumber":"12345"` | `400`, `errors.phoneNumber` |
+| Name too long | `fullName` of 201 characters | `400` |
+| Address too long | `address` of 501 characters | `400` |
+| No token | Omit the `Authorization` header | `401` |
+
+### 2. Read and update
+
+```bash
+curl -s -w ' [%{http_code}]\n' $B/customers/$C -H "Authorization: Bearer $TA"          # expect 200
+curl -s -w ' [%{http_code}]\n' $B/customers/$(uuidgen) -H "Authorization: Bearer $TA"  # unknown id: expect 404
+curl -s -w ' [%{http_code}]\n' -X PUT $B/customers/$C -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"fullName":"Meena Sundaram","phoneNumber":"+919000000001","address":null}'      # expect 200, address null
+```
+
+### 3. Tenant isolation
+
+Every command below uses lender B's token against lender A's customer, and must return `404`:
+
+```bash
+for r in "GET $C" "GET $C/loans" "GET $C/outstanding"; do
+  set -- $r; curl -s -o /dev/null -w "$1 $2 [%{http_code}]\n" -X $1 $B/customers/$2 -H "Authorization: Bearer $TB"
+done
+curl -s -o /dev/null -w 'PUT [%{http_code}]\n' -X PUT $B/customers/$C -H "Authorization: Bearer $TB" -H "$J" \
+  -d '{"fullName":"Hacked","phoneNumber":"9000000000"}'
+curl -s -o /dev/null -w 'PATCH [%{http_code}]\n' -X PATCH $B/customers/$C/status -H "Authorization: Bearer $TB" -H "$J" \
+  -d '{"isActive":false}'
+curl -s $B/customers -H "Authorization: Bearer $TB"      # expect "items":[] and "totalCount":0
+```
+
+Then read the customer as lender A again: `fullName` must still be `Meena Sundaram` and `isActive` must be `true`.
+
+### 4. List, search and paging
+
+Create a few customers first (names `Anita Rao`, `Bala Murugan`, `Chitra Anand`), then:
+
+```bash
+curl -s "$B/customers?page=1&pageSize=2"        -H "Authorization: Bearer $TA"   # 2 items, totalPages reflects the total
+curl -s "$B/customers?search=murug"             -H "Authorization: Bearer $TA"   # case-insensitive name match
+curl -s "$B/customers?search=9000"              -H "Authorization: Bearer $TA"   # phone match
+curl -s "$B/customers?isActive=false"           -H "Authorization: Bearer $TA"   # inactive only
+curl -s -w ' [%{http_code}]\n' "$B/customers?pageSize=101" -H "Authorization: Bearer $TA"   # expect 400
+curl -s -w ' [%{http_code}]\n' "$B/customers?page=0"       -H "Authorization: Bearer $TA"   # expect 400
+```
+
+Expected order is by name. A page past the end returns `200` with an empty `items` list.
+
+### 5. Deactivate and reactivate
+
+```bash
+curl -s -w ' [%{http_code}]\n' -X PATCH $B/customers/$C/status -H "Authorization: Bearer $TA" -H "$J" -d '{"isActive":false}'   # 204
+curl -s $B/customers/$C -H "Authorization: Bearer $TA"                                                                          # isActive false
+curl -s -w ' [%{http_code}]\n' -X PATCH $B/customers/$C/status -H "Authorization: Bearer $TA" -H "$J" -d '{"isActive":true}'    # 204
+```
+
+The customer is never deleted, and repeating a request returns `204` again.
+
+### 6. Loans and outstanding with seeded data
+
+New customers have no loans, so `/loans` returns `[]` and `/outstanding` returns `0`. To see real data, use a seeded lender (Development only; see [Development seed data](#development-seed-data)):
+
+```bash
+TS=$(curl -s -X POST $B/auth/login -H "$J" \
+  -d '{"email":"contact@annapoorna-finance.example","password":"KredFlow@Dev2026!"}' \
+  | sed -E 's/.*"accessToken":"([^"]+)".*/\1/')
+
+# Pick a seeded customer that has an Active or Overdue loan
+S=$(psql -U mohanac -d kredflow_advanced_api -Atc "select c.\"Id\" from \"Customers\" c join \"Lenders\" le on le.\"Id\" = c.\"LenderId\" join \"Loans\" l on l.\"CustomerId\" = c.\"Id\" where le.\"BusinessName\" = 'Annapoorna Finance' and l.\"Status\" in ('Active', 'Overdue') limit 1")
+
+curl -s $B/customers/$S/loans       -H "Authorization: Bearer $TS"       # loans, newest startDate first, status as text
+curl -s $B/customers/$S/outstanding -H "Authorization: Bearer $TS"       # openLoanCount and totalOutstanding
+```
+
+Cross-check the figure in `psql`. It must equal the scheduled amount minus the allocated payments for the customer's `Active` and `Overdue` loans:
+
+```bash
+psql -U mohanac -d kredflow_advanced_api -c "
+select
+  (select coalesce(sum(rs.\"TotalDue\"), 0) from \"RepaymentSchedules\" rs
+     join \"Loans\" l on l.\"Id\" = rs.\"LoanId\"
+    where l.\"CustomerId\" = '$S' and l.\"Status\" in ('Active', 'Overdue')) as due,
+  (select coalesce(sum(pa.\"InterestAmount\" + pa.\"PrincipalAmount\"), 0) from \"PaymentAllocations\" pa
+     join \"RepaymentSchedules\" rs on rs.\"Id\" = pa.\"ScheduleId\"
+     join \"Loans\" l on l.\"Id\" = rs.\"LoanId\"
+    where l.\"CustomerId\" = '$S' and l.\"Status\" in ('Active', 'Overdue')) as paid;"
+```
+
+`totalOutstanding` is `due - paid`. Closed and defaulted loans must not contribute. A customer whose first loan is `Defaulted` or `Closed` correctly shows `0`, which is why the query above picks a customer with an open loan.
+
+### Clean up
+
+Customers created above belong to the throwaway lenders, so removing them is part of the [auth cleanup](#clean-up-test-records) (delete customers first because of the restrictive foreign key):
+
+```bash
+psql -U mohanac -d kredflow_advanced_api -c "delete from \"Customers\" where \"LenderId\" in (select \"Id\" from \"Lenders\" where \"OwnerName\" = 'Ravi');"
+```
+
+Run it before the lender delete in the auth cleanup, and never against the seeded lenders.
+
 ## Tests
 
 ```bash
 dotnet test KredFlow.slnx
 ```
 
-Run only the auth tests with `dotnet test KredFlow.slnx --filter "FullyQualifiedName~Auth"`.
+Run only the auth tests with `dotnet test KredFlow.slnx --filter "FullyQualifiedName~Auth"`, or only the customer tests with `--filter "FullyQualifiedName~CustomerApi"`.
 
 - `DatabaseSeederTests` covers the seed data and its determinism.
 - `AuthApiTests` runs the real API over HTTP against in-memory Sqlite: registration, duplicate emails, validation, login claims, uniform `401` failures, lockout, `me`, and rejection of tokens after a lender is deactivated.
