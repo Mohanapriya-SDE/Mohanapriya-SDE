@@ -12,7 +12,8 @@ Built with ASP.NET Core (.NET 10), EF Core 10, PostgreSQL, ASP.NET Core Identity
 | Lender profile (`GET`/`PUT /lenders/me`) and deactivation | Implemented |
 | Domain model, migrations, development seed data | Implemented |
 | Customer management API (`/customers`) | Implemented |
-| Loan, Payment and Reporting APIs | Not started |
+| Loan management API (`/loans`): create with schedule, read, list, schedule, outstanding, close, prepayment | Implemented |
+| Payment (regular payments, reversals) and Reporting APIs | Not started |
 | Refresh tokens and logout | Not started |
 
 ## Solution layout
@@ -37,10 +38,10 @@ Dependencies point inward: `Api` -> `Application`/`Infrastructure` -> `Domain`. 
 | `Lender` | The tenant: a lending business. Has `BusinessName`, `OwnerName`, `Email` (unique), `PhoneNumber`, `Address`, `TimeZone` (IANA id, default `Asia/Kolkata`), `IsActive`, `CreatedAt`. |
 | `ApplicationUser` | An Identity user (`IdentityUser<Guid>`) belonging to one lender. Adds `LenderId`, `FullName`, `IsActive`, `CreatedAt`. Role is an Identity role: `Owner` or `Staff`. |
 | `Customer` | A borrower of a lender. Has `FullName`, `PhoneNumber` (not unique), `Address`, `IsActive` (soft deactivation) and `CreatedAt`. |
-| `Loan` | Principal, annual interest rate, tenure, EMI, start date and status (`Active`, `Closed`, `Overdue`, `Defaulted`). |
-| `RepaymentSchedule` | One row per monthly installment (principal, interest, total due, due date). |
-| `Payment` | Money received for a loan (amount, date, method: `Cash`, `UPI`, `BankTransfer`, ...). |
-| `PaymentAllocation` | How a payment is split between a schedule row's interest and principal. |
+| `Loan` | Principal, annual interest rate, tenure, EMI, start date and status (`Active`, `Closed`, `Overdue`, `Defaulted`). Also `PrepaymentPolicy` (`ReduceTenure`, `ReduceEmi`, `LenderChoice`), `CreatedAt`, `ClosedDate`, `ClosureRemarks` and a concurrency `Version`. `TenureMonths` and `EmiAmount` hold the current values, so a prepayment recast updates them. |
+| `RepaymentSchedule` | One row per monthly installment (opening principal, principal, interest, total due, due date). A prepayment recast marks replaced rows `IsSuperseded` instead of deleting them; only current rows are shown and counted. Paid and remaining amounts are never stored: they are summed from allocations. |
+| `Payment` | Money received for a loan (amount, date, method: `Cash`, `UPI`, `BankTransfer`, ...), a `Type` (`Regular`, `Prepayment`), `Remarks` and `CreatedAt`. |
+| `PaymentAllocation` | How a payment is split between interest and principal. Either applied to a schedule row (`Installment`) or principal paid ahead of the schedule (`PrincipalPrepayment`, no schedule row). |
 | `LoanTransaction` | Ledger entries for a loan: `Disbursement`, `Repayment`, `Penalty`. |
 
 Conventions: UUID primary keys, money as `decimal` (`NUMERIC(18,2)`), business dates as `DateOnly`, timestamps in UTC, enums stored as strings. Deleting a lender, customer or loan is blocked by restrictive foreign keys, so historical financial data is never lost.
@@ -103,6 +104,11 @@ All settings live in [src/KredFlow.Api/appsettings.json](src/KredFlow.Api/appset
 | `Jwt:AccessTokenExpiryMinutes` | `15` | Access token lifetime. |
 | `Jwt:SigningKey` | none (required) | HS256 key, at least 32 characters. Secret. |
 | `Lenders:SupportedTimeZones` | `["Asia/Kolkata"]` | Time zone ids a lender may choose. Must include `Asia/Kolkata` (the registration default) and only ids known to the host OS; the app fails to start otherwise. |
+| `Loans:MinPrincipal` / `MaxPrincipal` | `1000` / `10000000` | Allowed principal for a new loan. |
+| `Loans:MinAnnualInterestRate` / `MaxAnnualInterestRate` | `0.01` / `60` | Allowed annual interest rate in percent (at most 2 decimals). |
+| `Loans:MinTenureMonths` / `MaxTenureMonths` | `1` / `360` | Allowed tenure. |
+| `Loans:MaxBackdatedDays` / `MaxFutureDays` | `365` / `30` | How far from the lender's today a loan's start date may be. |
+| `Loans:DefaultPrepaymentPolicy` | `LenderChoice` | Policy given to a loan created without one. The app fails to start if a minimum exceeds its maximum. |
 | `RateLimiting:Login:PermitLimit` / `WindowSeconds` | `5` / `60` | Login attempts per client IP. |
 | `RateLimiting:Register:PermitLimit` / `WindowSeconds` | `3` / `600` | Registrations per client IP. |
 
@@ -344,7 +350,7 @@ An out-of-range `page` or `pageSize` returns `400`. A page past the end returns 
 
 - Nothing is deleted. Loans, payments and transactions of an inactive customer stay readable.
 - Deactivation is allowed while the customer has open loans (unlike lenders, which are blocked).
-- Rejecting new loans for an inactive customer is enforced when loan creation is added; the flag is already stored for it.
+- Rejecting new loans for an inactive customer is enforced by loan creation (`422`); reactivating the customer allows it again.
 
 ### Loan history
 
@@ -373,7 +379,7 @@ An out-of-range `page` or `pageSize` returns `400`. A page past the end returns 
 ```
 
 - Only `Active` and `Overdue` loans count; `Closed` and `Defaulted` loans are excluded.
-- Per loan it is the sum of the schedule's `TotalDue` minus the allocated payments (interest plus principal), never below zero.
+- Per loan it uses the same definition as [loan outstanding](#loan-outstanding): unpaid principal plus interest accrued on installments already due, as of today in the lender's time zone. Future interest is not included.
 - A loan with no repayment schedule yet counts its full principal.
 - A customer with no open loans returns `0` for both numbers.
 
@@ -384,6 +390,220 @@ An out-of-range `page` or `pageSize` returns `400`. A page past the end returns 
 | `400` | Blank or too long `fullName`, invalid `phoneNumber`, `address` over 500 characters, or an invalid list query. The body is a validation problem with an `errors` object keyed by field |
 | `401` | Missing, invalid or expired token |
 | `404` | The id does not exist **or belongs to another lender**. Both cases are deliberately identical, so ids cannot be probed across lenders |
+
+## Loan API
+
+Loans belong to the caller's lender (taken from the token, never from the request). A loan of another lender is reported as `404`, the same as an unknown id. All endpoints require a valid token; closing a loan needs the `Owner` role.
+
+| Method and path | Role | Success | Failure |
+|---|---|---|---|
+| `POST /api/v1/loans` | Any | `201 Created` with `Location` | `400`, `401`, `404`, `422` |
+| `GET /api/v1/loans/{loanId}` | Any | `200 OK` | `401`, `404` |
+| `GET /api/v1/loans?customerId=&status=&minPrincipal=&maxPrincipal=&startDateFrom=&startDateTo=&page=&pageSize=` | Any | `200 OK` (`PagedResponse`) | `400`, `401` |
+| `GET /api/v1/loans/{loanId}/schedule?asOfDate=` | Any | `200 OK` | `401`, `404` |
+| `GET /api/v1/loans/{loanId}/outstanding?asOfDate=` | Any | `200 OK` | `401`, `404` |
+| `POST /api/v1/loans/{loanId}/close` | `Owner` | `200 OK` | `400`, `401`, `403`, `404`, `409`, `422` |
+| `POST /api/v1/loans/{loanId}/prepayments` | Any | `201 Created` | `400`, `401`, `404`, `409`, `422` |
+
+### Create a loan
+
+```json
+{
+  "customerId": "22222222-2222-2222-2222-222222222222",
+  "principalAmount": 100000,
+  "annualInterestRate": 12,
+  "tenureMonths": 12,
+  "startDate": "2026-11-15",
+  "prepaymentPolicy": "LenderChoice"
+}
+```
+
+The EMI, the lender and the schedule rows are backend responsibilities. If a client sends `emiAmount`, `lenderId` or schedule rows, they are ignored.
+
+| Field | Rule |
+|---|---|
+| `customerId` | Must be an **active** customer of the caller's lender (`404` if not found or owned by another lender, `422` if inactive) |
+| `principalAmount` | `Loans:MinPrincipal` to `Loans:MaxPrincipal` (default 1,000 to 10,000,000), at most 2 decimals |
+| `annualInterestRate` | `Loans:MinAnnualInterestRate` to `Loans:MaxAnnualInterestRate` (default 0.01 to 60), at most 2 decimals |
+| `tenureMonths` | `Loans:MinTenureMonths` to `Loans:MaxTenureMonths` (default 1 to 360) |
+| `startDate` | Within `Loans:MaxBackdatedDays` before and `Loans:MaxFutureDays` after today in the lender's time zone (default 365 and 30) |
+| `prepaymentPolicy` | Optional: `ReduceTenure`, `ReduceEmi` or `LenderChoice`. Defaults to `Loans:DefaultPrepaymentPolicy` |
+
+The service checks the customer, calculates the EMI with the reducing-balance formula, builds the schedule, and saves the loan, schedule rows and a `Disbursement` ledger entry in **one transaction**. If the generated schedule does not match the loan terms, nothing is saved.
+
+```json
+{
+  "id": "33333333-3333-3333-3333-333333333333",
+  "customerId": "22222222-2222-2222-2222-222222222222",
+  "principalAmount": 100000,
+  "annualInterestRate": 12,
+  "tenureMonths": 12,
+  "emiAmount": 8884.88,
+  "startDate": "2026-11-15",
+  "status": "Active",
+  "prepaymentPolicy": "LenderChoice",
+  "scheduleGenerated": true,
+  "closedDate": null,
+  "createdAt": "2026-11-12T10:00:00Z"
+}
+```
+
+**Calculation rules** (the same for every schedule the system generates):
+
+- Monthly rate is `annualInterestRate / 12 / 100`. EMI is `P * r * (1+r)^n / ((1+r)^n - 1)`; a zero rate divides the principal evenly.
+- Money is rounded to 2 decimals, half away from zero. Each row's interest is the opening principal times the monthly rate; its principal is the EMI minus that interest. The last installment takes whatever principal is left, so principal always sums exactly to the loan amount.
+- Installment `n` is due `startDate` plus `n` months, always counted from the start date, so a loan starting on the 31st is due on the last day of shorter months and then returns to the 31st.
+
+### Get and list
+
+`GET /api/v1/loans/{loanId}` returns the `LoanResponse` above. `GET /api/v1/loans` returns a `PagedResponse<LoanResponse>`, newest `startDate` first.
+
+| Query parameter | Rule |
+|---|---|
+| `customerId` | Loans of one customer |
+| `status` | `Active`, `Closed`, `Defaulted` or `Overdue` |
+| `minPrincipal`, `maxPrincipal` | Inclusive; the minimum must not exceed the maximum |
+| `startDateFrom`, `startDateTo` | Inclusive `yyyy-MM-dd`; `from` must not be after `to` |
+| `page`, `pageSize` | `1` or more, default 20, max 100 |
+
+### Repayment schedule
+
+`GET /api/v1/loans/{loanId}/schedule` returns the current installments in order. `asOfDate` (default: today in the lender's time zone) only affects `paymentStatus`.
+
+```json
+[
+  {
+    "installmentNumber": 1,
+    "dueDate": "2026-12-15",
+    "openingPrincipal": 100000,
+    "principalDue": 7884.88,
+    "interestDue": 1000,
+    "totalDue": 8884.88,
+    "paidAmount": 0,
+    "remainingAmount": 8884.88,
+    "paymentStatus": "Upcoming"
+  }
+]
+```
+
+`paidAmount` and `remainingAmount` are computed from payment allocations on every request; there is no editable paid figure.
+
+| `paymentStatus` | When |
+|---|---|
+| `Paid` | Nothing remains |
+| `Overdue` | Something remains and the due date is before `asOfDate` |
+| `Partial` | Part is paid and the due date is not yet past |
+| `Due` | Unpaid and due on `asOfDate` |
+| `Upcoming` | Unpaid and due after `asOfDate` |
+
+### Loan outstanding
+
+`GET /api/v1/loans/{loanId}/outstanding?asOfDate=2026-12-15`:
+
+```json
+{
+  "loanId": "33333333-3333-3333-3333-333333333333",
+  "principalOutstanding": 92115.12,
+  "accruedUnpaidInterest": 0,
+  "overdueAmount": 0,
+  "totalOutstanding": 92115.12,
+  "asOfDate": "2026-12-15"
+}
+```
+
+Accrual is **per installment**, not daily:
+
+- `principalOutstanding` is the loan principal minus every principal allocation (installment payments and prepayments).
+- `accruedUnpaidInterest` is the unpaid interest of installments due on or before `asOfDate`. Interest of later installments has not accrued, and nothing accrues between due dates.
+- `overdueAmount` is the unpaid total (principal and interest) of installments due **before** `asOfDate`.
+- `totalOutstanding` is `principalOutstanding + accruedUnpaidInterest`. It is not what a customer must pay today: use `overdueAmount` for arrears.
+
+### Close a loan
+
+`POST /api/v1/loans/{loanId}/close` (Owner only):
+
+```json
+{ "closureDate": "2027-11-15", "remarks": "All dues settled" }
+```
+
+Returns `200` with the `LoanResponse` (`status` `Closed`, `closedDate` set). The loan must have no principal, no accrued interest as of `closureDate`, and no net penalties (penalty entries minus waivers). Otherwise `422` lists the amounts still due.
+
+| Rule | Result |
+|---|---|
+| Loan already closed | `409` |
+| `closureDate` in the future, before the start date, or before the last payment | `422` |
+| Penalties not waived | `422`. There is no way to pay a penalty yet, so a penalized loan can only be closed after a waiver entry exists |
+| Not an `Owner` | `403` |
+
+### Prepayment
+
+`POST /api/v1/loans/{loanId}/prepayments`:
+
+```json
+{
+  "amount": 20000,
+  "paymentDate": "2027-02-15",
+  "treatment": "ReduceTenure",
+  "paymentMethod": "BankTransfer",
+  "remarks": "Additional principal repayment"
+}
+```
+
+A prepayment is posted as a `Payment` of type `Prepayment`, with its allocations and a `Repayment` ledger entry. `paymentMethod` defaults to `Cash`. The response (`201`) shows what happened:
+
+```json
+{
+  "paymentId": "b6a8...",
+  "loanId": "3333...",
+  "amount": 20000,
+  "paymentDate": "2027-02-15",
+  "treatment": "ReduceTenure",
+  "installmentAmountSettled": 0,
+  "principalPrepaid": 20000,
+  "principalOutstanding": 80000,
+  "emiAmount": 8884.88,
+  "tenureMonths": 10
+}
+```
+
+**Prepayment policy** is set per loan at creation:
+
+| Policy | Effect of a prepayment |
+|---|---|
+| `ReduceTenure` | The EMI stays; the remaining installments are regenerated and finish sooner |
+| `ReduceEmi` | The remaining installment count stays; the EMI is recalculated on the lower balance |
+| `LenderChoice` (default) | Each request must say `treatment`: `ReduceTenure` or `ReduceEmi` (`400` if missing) |
+
+For the two fixed policies `treatment` may be omitted; a different value returns `422`.
+
+**How it is posted:**
+
+1. Every installment due on or before `paymentDate` must already be fully paid, otherwise `422` (a prepayment never hides arrears).
+2. If a future installment is partly paid, the amount settles it first (interest, then principal).
+3. The rest is recorded as principal paid ahead of the schedule, as an allocation with no schedule row.
+4. Installments after the last due or part-paid one are marked superseded and regenerated on the new balance, continuing the numbering. Interest is recomputed on the lower balance from the next unpaid installment, so there is no daily or pro-rata interest. Superseded rows are kept for audit.
+5. The loan's `emiAmount`, `tenureMonths` and concurrency version are updated, all in one transaction.
+
+| Rule | Result |
+|---|---|
+| `amount` is not positive | `400` |
+| `amount` is more than the payoff (principal outstanding plus unpaid interest of part-paid installments) | `422` |
+| `paymentDate` in the future, before the loan start, or before the last payment | `422` |
+| Loan closed | `422` |
+| A concurrent change to the same loan | `409`; reload and retry |
+
+Paying off the entire balance leaves no installments; the loan stays `Active` until it is closed explicitly.
+
+### Errors
+
+| Status | When |
+|---|---|
+| `400` | Invalid request (see the rules above). The body has an `errors` object keyed by field |
+| `401` | Missing, invalid or expired token |
+| `403` | Closing a loan without the `Owner` role |
+| `404` | Loan or customer not found, **or owned by another lender** (deliberately identical) |
+| `409` | Loan already closed, or the loan was changed by another request |
+| `422` | Inactive customer, outstanding dues, penalties, or an invalid prepayment |
 
 ## Error responses
 
@@ -769,21 +989,29 @@ curl -s $B/customers/$S/loans       -H "Authorization: Bearer $TS"       # loans
 curl -s $B/customers/$S/outstanding -H "Authorization: Bearer $TS"       # openLoanCount and totalOutstanding
 ```
 
-Cross-check the figure in `psql`. It must equal the scheduled amount minus the allocated payments for the customer's `Active` and `Overdue` loans:
+Cross-check the figure in `psql`. It must equal unpaid principal plus the unpaid interest of installments already due, over the customer's `Active` and `Overdue` loans:
 
 ```bash
 psql -U mohanac -d kredflow_advanced_api -c "
 select
-  (select coalesce(sum(rs.\"TotalDue\"), 0) from \"RepaymentSchedules\" rs
+  (select coalesce(sum(l.\"Principal\"), 0) from \"Loans\" l
+    where l.\"CustomerId\" = '$S' and l.\"Status\" in ('Active', 'Overdue'))
+  - (select coalesce(sum(pa.\"PrincipalAmount\"), 0) from \"PaymentAllocations\" pa
+       join \"Payments\" p on p.\"Id\" = pa.\"PaymentId\"
+       join \"Loans\" l on l.\"Id\" = p.\"LoanId\"
+      where l.\"CustomerId\" = '$S' and l.\"Status\" in ('Active', 'Overdue')) as principal_outstanding,
+  (select coalesce(sum(rs.\"InterestDue\"), 0) from \"RepaymentSchedules\" rs
      join \"Loans\" l on l.\"Id\" = rs.\"LoanId\"
-    where l.\"CustomerId\" = '$S' and l.\"Status\" in ('Active', 'Overdue')) as due,
-  (select coalesce(sum(pa.\"InterestAmount\" + pa.\"PrincipalAmount\"), 0) from \"PaymentAllocations\" pa
-     join \"RepaymentSchedules\" rs on rs.\"Id\" = pa.\"ScheduleId\"
-     join \"Loans\" l on l.\"Id\" = rs.\"LoanId\"
-    where l.\"CustomerId\" = '$S' and l.\"Status\" in ('Active', 'Overdue')) as paid;"
+    where l.\"CustomerId\" = '$S' and l.\"Status\" in ('Active', 'Overdue')
+      and not rs.\"IsSuperseded\" and rs.\"DueDate\" <= current_date)
+  - (select coalesce(sum(pa.\"InterestAmount\"), 0) from \"PaymentAllocations\" pa
+       join \"RepaymentSchedules\" rs on rs.\"Id\" = pa.\"ScheduleId\"
+       join \"Loans\" l on l.\"Id\" = rs.\"LoanId\"
+      where l.\"CustomerId\" = '$S' and l.\"Status\" in ('Active', 'Overdue')
+        and not rs.\"IsSuperseded\" and rs.\"DueDate\" <= current_date) as accrued_interest;"
 ```
 
-`totalOutstanding` is `due - paid`. Closed and defaulted loans must not contribute. A customer whose first loan is `Defaulted` or `Closed` correctly shows `0`, which is why the query above picks a customer with an open loan.
+`totalOutstanding` is `principal_outstanding + accrued_interest`. Closed and defaulted loans must not contribute. A customer whose loans are all `Defaulted` or `Closed` correctly shows `0`, which is why the query above picks a customer with an open loan.
 
 ### Clean up
 
@@ -795,25 +1023,256 @@ psql -U mohanac -d kredflow_advanced_api -c "delete from \"Customers\" where \"L
 
 Run it before the lender delete in the auth cleanup, and never against the seeded lenders.
 
+## Testing the loan API
+
+### Strategy
+
+| Layer | What it proves | How to run |
+|---|---|---|
+| Unit tests (`LoanCalculatorTests`) | EMI and schedule maths, rounding, month-end due dates, prepayment allocation, balance and accrual rules | `dotnet test KredFlow.slnx --filter "FullyQualifiedName~LoanCalculator"` |
+| API tests (`LoanApiTests`) | The real HTTP pipeline on in-memory Sqlite: create with schedule, validation, tenant isolation, filters, derived statuses, close rules, both prepayment treatments | `dotnet test KredFlow.slnx --filter "FullyQualifiedName~LoanApi"` |
+| Manual `curl` against PostgreSQL | The migration, the partial unique index that lets a recast reuse installment numbers, real JSON shapes and seeded data | This section |
+
+What to verify, in priority order:
+
+1. **Money is right.** The EMI for 100,000 at 12% over 12 months is `8884.88`, the first row splits `1000` interest and `7884.88` principal, and principal across all rows sums to exactly the loan amount.
+2. **Tenant isolation.** Another lender gets `404` on every loan endpoint, and cannot create a loan for your customer.
+3. **Backend-owned fields.** A client-sent `emiAmount`, `lenderId` or schedule is ignored.
+4. **Atomicity.** A rejected request leaves no loan, schedule, payment or ledger rows behind.
+5. **Derived figures.** Paid, remaining, status and outstanding change only when allocations change.
+6. **Rules.** Close and prepayment reject what the [Loan API](#loan-api) says they reject.
+
+### Setup
+
+Reuse the `token` function and `$TA` / `$TB` tokens from [Testing the customer API](#setup-1), then:
+
+```bash
+B=http://localhost:5208/api/v1
+J='Content-Type: application/json'
+TODAY=$(date +%F)
+BACK=$(date -v-95d +%F 2>/dev/null || date -d '-95 days' +%F)      # 95 days ago (macOS or Linux)
+
+C=$(curl -s -X POST $B/customers -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"fullName":"Meena Devi","phoneNumber":"9123456789"}' | sed -E 's/.*"id":"([^"]+)".*/\1/')
+
+# Create a loan and print its id: loan <principal> <rate> <months> <startDate> [policy]
+loan() {
+  curl -s -X POST $B/loans -H "Authorization: Bearer $TA" -H "$J" \
+    -d '{"customerId":"'$C'","principalAmount":'$1',"annualInterestRate":'$2',"tenureMonths":'$3',"startDate":"'$4'"'"${5:+,\"prepaymentPolicy\":\"$5\"}"'}' \
+    | sed -E 's/.*"id":"([^"]+)".*/\1/'
+}
+
+# Stand-in for the Payment module: record a full payment of one installment
+pay() {
+  psql -U mohanac -d kredflow_advanced_api -c "
+  with r as (select \"Id\", \"LoanId\", \"PrincipalDue\", \"InterestDue\", \"TotalDue\" from \"RepaymentSchedules\"
+             where \"LoanId\" = '$1' and \"InstallmentNumber\" = $2 and not \"IsSuperseded\"),
+       p as (insert into \"Payments\"(\"Id\", \"LoanId\", \"Amount\", \"PaymentDate\", \"PaymentMethod\", \"Type\", \"CreatedAt\")
+             select gen_random_uuid(), \"LoanId\", \"TotalDue\", current_date, 'Cash', 'Regular', now() from r returning \"Id\")
+  insert into \"PaymentAllocations\"(\"Id\", \"PaymentId\", \"ScheduleId\", \"InterestAmount\", \"PrincipalAmount\", \"Type\")
+  select gen_random_uuid(), p.\"Id\", r.\"Id\", r.\"InterestDue\", r.\"PrincipalDue\", 'Installment' from p, r;"
+}
+```
+
+The payment endpoints do not exist yet, so `pay` writes a payment and its allocation straight to the database. Define both functions again in each new terminal.
+
+### 1. Create a loan
+
+```bash
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"customerId":"'$C'","principalAmount":100000,"annualInterestRate":12,"tenureMonths":12,"startDate":"'$TODAY'","emiAmount":5,"lenderId":"00000000-0000-0000-0000-000000000000"}'
+```
+
+Expected: `201`, `emiAmount` `8884.88` (the `5` is ignored), `status` `Active`, `prepaymentPolicy` `LenderChoice`, `scheduleGenerated` `true`. Add `-i` to see the `Location` header.
+
+```bash
+L=$(loan 100000 12 12 $TODAY)
+curl -s $B/loans/$L/schedule -H "Authorization: Bearer $TA" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d), d[0]); print(round(sum(r["principalDue"] for r in d), 2))'
+```
+
+Expected: 12 rows; row 1 has `openingPrincipal` `100000`, `interestDue` `1000`, `principalDue` `7884.88`, `totalDue` `8884.88`, `paymentStatus` `Upcoming`; the principal sum is `100000.0`. Check that the ledger has one disbursement:
+
+```bash
+psql -U mohanac -d kredflow_advanced_api -c "select \"TransactionType\", \"Amount\" from \"LoanTransactions\" where \"LoanId\" = '$L';"
+```
+
+### 2. Validation and rules
+
+Each of these returns no loan. Change one field of the request in step 1:
+
+| Change | Expected |
+|---|---|
+| `principalAmount` 999 or 10000001 | `400`, `errors.principalAmount` |
+| `annualInterestRate` 0, 60.01 or 12.123 | `400`, `errors.annualInterestRate` |
+| `tenureMonths` 0 or 361 | `400`, `errors.tenureMonths` |
+| `startDate` 366 days ago or 31 days ahead | `400`, `errors.startDate` |
+| `customerId` of a customer of lender B (use `$TB`'s) | `404` |
+| `customerId` of a deactivated customer | `422` |
+| No `Authorization` header | `401` |
+
+Deactivate and retry to see the inactive rule (reactivate with `true` afterwards):
+
+```bash
+curl -s -o /dev/null -X PATCH $B/customers/$C/status -H "Authorization: Bearer $TA" -H "$J" -d '{"isActive":false}'
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"customerId":"'$C'","principalAmount":50000,"annualInterestRate":12,"tenureMonths":6,"startDate":"'$TODAY'"}'    # expect 422
+curl -s -o /dev/null -X PATCH $B/customers/$C/status -H "Authorization: Bearer $TA" -H "$J" -d '{"isActive":true}'
+```
+
+### 3. Tenant isolation
+
+Lender B must get `404` on every endpoint for lender A's loan:
+
+```bash
+for r in "GET $L" "GET $L/schedule" "GET $L/outstanding"; do
+  set -- $r; curl -s -o /dev/null -w "$1 $2 [%{http_code}]\n" -X $1 $B/loans/$2 -H "Authorization: Bearer $TB"
+done
+curl -s -o /dev/null -w 'close [%{http_code}]\n' -X POST $B/loans/$L/close -H "Authorization: Bearer $TB" -H "$J" -d '{"closureDate":"'$TODAY'"}'
+curl -s -o /dev/null -w 'prepay [%{http_code}]\n' -X POST $B/loans/$L/prepayments -H "Authorization: Bearer $TB" -H "$J" \
+  -d '{"amount":5000,"paymentDate":"'$TODAY'","treatment":"ReduceTenure"}'
+curl -s $B/loans -H "Authorization: Bearer $TB"        # expect "items":[] and "totalCount":0
+```
+
+### 4. List and filter
+
+Create a few loans first (`loan 20000 12 6 $TODAY`, `loan 300000 15 24 $BACK`), then:
+
+```bash
+curl -s "$B/loans?status=Active"                              -H "Authorization: Bearer $TA"   # only Active
+curl -s "$B/loans?customerId=$C&minPrincipal=50000"           -H "Authorization: Bearer $TA"   # principal >= 50000
+curl -s "$B/loans?startDateFrom=$BACK&startDateTo=$TODAY"     -H "Authorization: Bearer $TA"   # by start date
+curl -s "$B/loans?page=1&pageSize=2"                          -H "Authorization: Bearer $TA"   # totalPages reflects the total
+curl -s -w ' [%{http_code}]\n' "$B/loans?minPrincipal=200&maxPrincipal=100" -H "Authorization: Bearer $TA"   # expect 400
+curl -s -w ' [%{http_code}]\n' "$B/loans?status=Bogus"       -H "Authorization: Bearer $TA"   # expect 400
+```
+
+Items are newest `startDate` first.
+
+### 5. Overdue, paid and outstanding
+
+Use a loan that started 95 days ago, so three installments are already past due:
+
+```bash
+O=$(loan 100000 12 12 $BACK)
+curl -s $B/loans/$O/outstanding -H "Authorization: Bearer $TA"
+```
+
+Expected: `principalOutstanding` `100000`, `accruedUnpaidInterest` is the interest of the three past rows, `overdueAmount` is 3 x `8884.88` = `26654.64`. In the schedule the first three rows are `Overdue`, the rest `Upcoming`.
+
+Record a payment of installment 1 and look again:
+
+```bash
+pay $O 1
+curl -s $B/loans/$O/schedule -H "Authorization: Bearer $TA" | python3 -c 'import sys,json; [print(r["installmentNumber"], r["paidAmount"], r["remainingAmount"], r["paymentStatus"]) for r in json.load(sys.stdin)[:4]]'
+curl -s $B/loans/$O/outstanding -H "Authorization: Bearer $TA"
+```
+
+Expected: row 1 is `Paid` with `remainingAmount` `0`, rows 2 and 3 stay `Overdue`; `principalOutstanding` drops by row 1's principal (`7884.88`); `overdueAmount` drops to 2 x `8884.88`.
+
+`asOfDate` changes what has accrued without changing any data:
+
+```bash
+curl -s "$B/loans/$O/outstanding?asOfDate=$BACK" -H "Authorization: Bearer $TA"    # accruedUnpaidInterest 0, overdueAmount 0
+```
+
+The customer's outstanding uses the same calculator: `curl -s $B/customers/$C/outstanding -H "Authorization: Bearer $TA"` must equal the sum of `totalOutstanding` over the customer's open loans.
+
+### 6. Prepayment
+
+```bash
+P=$(loan 100000 12 12 $TODAY)
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$P/prepayments -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"amount":20000,"paymentDate":"'$TODAY'"}'                                   # LenderChoice without treatment: expect 400
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$P/prepayments -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"amount":20000,"paymentDate":"'$TODAY'","treatment":"ReduceTenure","remarks":"extra"}'
+curl -s $B/loans/$P -H "Authorization: Bearer $TA"
+curl -s $B/loans/$P/schedule -H "Authorization: Bearer $TA" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d), round(sum(r["principalDue"] for r in d), 2))'
+```
+
+Expected: `201`, `treatment` `ReduceTenure`, `principalPrepaid` `20000`, `principalOutstanding` `80000`, `emiAmount` still `8884.88`, `tenureMonths` `10`. The loan shows `tenureMonths` `10`, and the schedule has 10 rows whose principal sums to `80000.0`.
+
+Reduce the EMI instead on a second loan:
+
+```bash
+Q=$(loan 100000 12 12 $TODAY)
+curl -s -X POST $B/loans/$Q/prepayments -H "Authorization: Bearer $TA" -H "$J" -d '{"amount":20000,"paymentDate":"'$TODAY'","treatment":"ReduceEmi"}'
+```
+
+Expected: `tenureMonths` stays `12` and `emiAmount` drops to `7107.9`. Then check the audit trail and the reused numbering:
+
+```bash
+psql -U mohanac -d kredflow_advanced_api -c "select \"IsSuperseded\", count(*), min(\"InstallmentNumber\"), max(\"InstallmentNumber\") from \"RepaymentSchedules\" where \"LoanId\" = '$P' group by 1 order by 1;"
+```
+
+Expected: 12 superseded rows and 10 current rows, both numbered from 1.
+
+| Scenario | Expected |
+|---|---|
+| Loan created with `"prepaymentPolicy":"ReduceTenure"`, prepay with `"treatment":"ReduceEmi"` | `422` |
+| Same loan, `treatment` omitted | `201`, treatment `ReduceTenure` |
+| Prepay the overdue loan `$O` today | `422`, unpaid installments due first |
+| `amount` above the payoff (for example `100000.01` on a fresh loan) | `422` |
+| `amount` `0` or negative | `400` |
+| `paymentDate` tomorrow or before the loan start | `422` |
+
+### 7. Close
+
+```bash
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$P/close -H "Authorization: Bearer $TA" -H "$J" -d '{"closureDate":"'$TODAY'"}'   # dues remain: expect 422
+```
+
+The `422` detail lists principal, interest and penalties still due. To close a loan, clear it. A full prepayment is the quickest way, since it needs no due installments:
+
+```bash
+F=$(loan 50000 12 6 $TODAY)
+curl -s -X POST $B/loans/$F/prepayments -H "Authorization: Bearer $TA" -H "$J" -d '{"amount":50000,"paymentDate":"'$TODAY'","treatment":"ReduceTenure"}'   # principalOutstanding 0, no installments left
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$F/close -H "Authorization: Bearer $TA" -H "$J" -d '{"closureDate":"'$TODAY'","remarks":"All dues settled"}'      # expect 200, status Closed
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$F/close -H "Authorization: Bearer $TA" -H "$J" -d '{"closureDate":"'$TODAY'"}'                              # expect 409
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$F/prepayments -H "Authorization: Bearer $TA" -H "$J" -d '{"amount":1000,"paymentDate":"'$TODAY'","treatment":"ReduceTenure"}'   # closed: expect 422
+```
+
+A `Staff` user gets `403` on `close` (the `token` function registers owners, so create a staff user in the database to try it, or rely on `LoanApiTests.Close_IsOwnerOnly`).
+
+### Clean up
+
+Loans belong to the throwaway lenders, so extend the [auth cleanup](#clean-up-test-records). Delete in dependency order before the customers and lenders:
+
+```bash
+psql -U mohanac -d kredflow_advanced_api <<'SQL'
+BEGIN;
+DELETE FROM "PaymentAllocations" WHERE "PaymentId" IN (SELECT p."Id" FROM "Payments" p JOIN "Loans" l ON l."Id" = p."LoanId" JOIN "Lenders" le ON le."Id" = l."LenderId" WHERE le."OwnerName" = 'Ravi');
+DELETE FROM "Payments" WHERE "LoanId" IN (SELECT l."Id" FROM "Loans" l JOIN "Lenders" le ON le."Id" = l."LenderId" WHERE le."OwnerName" = 'Ravi');
+DELETE FROM "LoanTransactions" WHERE "LoanId" IN (SELECT l."Id" FROM "Loans" l JOIN "Lenders" le ON le."Id" = l."LenderId" WHERE le."OwnerName" = 'Ravi');
+DELETE FROM "RepaymentSchedules" WHERE "LoanId" IN (SELECT l."Id" FROM "Loans" l JOIN "Lenders" le ON le."Id" = l."LenderId" WHERE le."OwnerName" = 'Ravi');
+DELETE FROM "Loans" WHERE "LenderId" IN (SELECT "Id" FROM "Lenders" WHERE "OwnerName" = 'Ravi');
+COMMIT;
+SQL
+```
+
+Then run the customer and auth cleanups. Never run this against the seeded lenders.
+
 ## Tests
 
 ```bash
 dotnet test KredFlow.slnx
 ```
 
-Run only the auth tests with `dotnet test KredFlow.slnx --filter "FullyQualifiedName~Auth"`, or only the customer tests with `--filter "FullyQualifiedName~CustomerApi"`.
+Run only the auth tests with `dotnet test KredFlow.slnx --filter "FullyQualifiedName~Auth"`, only the customer tests with `--filter "FullyQualifiedName~CustomerApi"`, or only the loan tests with `--filter "FullyQualifiedName~Loan"`.
 
 - `DatabaseSeederTests` covers the seed data and its determinism.
 - `AuthApiTests` runs the real API over HTTP against in-memory Sqlite: registration, duplicate emails, validation, login claims, uniform `401` failures, lockout, `me`, and rejection of tokens after a lender is deactivated.
 - `AuthEdgeCaseTests` covers rate limiting, startup with a missing signing key or invalid time zone list, transaction rollback, phone normalization and the password policy.
 - `CustomerApiTests` covers the customer API: create, validation, tenant isolation, search and paging, soft deactivation, loan history and outstanding.
+- `LoanCalculatorTests` covers the pure loan maths: EMI, schedule invariants, month-end due dates, prepayment planning and per-installment accrual.
+- `LoanApiTests` covers the loan API: create with schedule and disbursement, ignored client fields, validation, tenant isolation, filters and paging, derived schedule status and outstanding, close rules, and both prepayment treatments.
 - `LenderApiTests` covers the lender profile: read, update, owner-only access, and deactivation (including blocked access afterwards, kept data, and the open-loan rule).
 
 Integration tests run with the `Testing` environment, which skips the Development migrate-and-seed step. The tests create the schema with `EnsureCreated`, because the migrations are specific to PostgreSQL.
 
 ## Roadmap
 
-- Loan, Payment and Reporting endpoints, with all queries scoped to the caller's `lenderId`
+- Payment endpoints (regular payments, reversals, partial and excess payments, penalty payment and waiver), reusing the allocation engine from loan prepayments, plus Reporting endpoints, with all queries scoped to the caller's `lenderId`
+- A scheduled job that moves loans to `Overdue` and `Defaulted`; until then `status` is whatever was last stored
 - Refresh tokens (hashed at rest, rotated on use) and logout
 - Staff user management for a lender
 - Business-date calculations in the lender's time zone

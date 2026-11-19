@@ -2,6 +2,7 @@ using KredFlow.Application.Auth;
 using KredFlow.Application.Common;
 using KredFlow.Application.Exceptions;
 using KredFlow.Application.Interfaces;
+using KredFlow.Application.Loans;
 using KredFlow.Domain.Entities;
 
 namespace KredFlow.Application.Customers;
@@ -10,6 +11,8 @@ public class CustomerService(
     ICustomerRepository customers,
     IUnitOfWork unitOfWork,
     ICurrentUserService currentUser,
+    ILoanRepository loans,
+    ILenderClock clock,
     TimeProvider timeProvider) : ICustomerService
 {
     public async Task<CustomerResponse> CreateAsync(CreateCustomerRequest request, CancellationToken cancellationToken = default)
@@ -89,13 +92,23 @@ public class CustomerService(
     public async Task<CustomerOutstandingResponse> GetOutstandingAsync(Guid customerId, CancellationToken cancellationToken = default)
     {
         var customer = await LoadAsync(customerId, cancellationToken);
-        var (openLoans, outstanding) = await customers.GetOutstandingAsync(customer.Id, cancellationToken);
+        var openLoans = await customers.GetOpenLoansAsync(customer.Id, cancellationToken);
+        var today = await clock.TodayAsync(cancellationToken);
+
+        // Same definition as the loan endpoint: unpaid principal plus interest accrued on installments already due.
+        var total = 0m;
+        foreach (var loan in openLoans)
+        {
+            var rows = await loans.GetCurrentScheduleAsync(loan.Id, cancellationToken);
+            var principalPaid = await loans.GetPrincipalPaidAsync(loan.Id, cancellationToken);
+            total += LoanBalanceCalculator.Calculate(loan.Principal, principalPaid, rows.Select(ScheduleRowFigures.From), today).TotalOutstanding;
+        }
 
         return new CustomerOutstandingResponse
         {
             CustomerId = customer.Id,
-            OpenLoanCount = openLoans,
-            TotalOutstanding = outstanding
+            OpenLoanCount = openLoans.Count,
+            TotalOutstanding = total
         };
     }
 

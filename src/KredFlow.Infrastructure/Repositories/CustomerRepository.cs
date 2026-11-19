@@ -45,40 +45,8 @@ public class CustomerRepository(KredFlowDbContext db) : ICustomerRepository
             .OrderByDescending(x => x.StartDate).ThenBy(x => x.Id)
             .ToListAsync(cancellationToken);
 
-    public async Task<(int OpenLoanCount, decimal TotalOutstanding)> GetOutstandingAsync(
-        Guid customerId, CancellationToken cancellationToken = default)
-    {
-        var open = await db.Loans.AsNoTracking()
+    public async Task<IReadOnlyList<Loan>> GetOpenLoansAsync(Guid customerId, CancellationToken cancellationToken = default) =>
+        await db.Loans.AsNoTracking()
             .Where(l => l.CustomerId == customerId && (l.Status == LoanStatus.Active || l.Status == LoanStatus.Overdue))
-            .Select(l => new { l.Id, l.Principal })
             .ToListAsync(cancellationToken);
-
-        if (open.Count == 0)
-        {
-            return (0, 0m);
-        }
-
-        var loanIds = open.Select(l => l.Id).ToList();
-
-        // Summed client-side because Sqlite (used in tests) can't aggregate decimals in SQL.
-        var due = await db.RepaymentSchedules.AsNoTracking()
-            .Where(s => loanIds.Contains(s.LoanId))
-            .Select(s => new { s.LoanId, s.TotalDue })
-            .ToListAsync(cancellationToken);
-
-        var paid = await db.PaymentAllocations.AsNoTracking()
-            .Where(a => loanIds.Contains(a.Schedule.LoanId))
-            .Select(a => new { a.Schedule.LoanId, a.InterestAmount, a.PrincipalAmount })
-            .ToListAsync(cancellationToken);
-
-        var dueByLoan = due.GroupBy(x => x.LoanId).ToDictionary(g => g.Key, g => g.Sum(x => x.TotalDue));
-        var paidByLoan = paid.GroupBy(x => x.LoanId).ToDictionary(g => g.Key, g => g.Sum(x => x.InterestAmount + x.PrincipalAmount));
-
-        // A loan with no schedule yet is still owed its principal.
-        var total = open.Sum(l => dueByLoan.TryGetValue(l.Id, out var d)
-            ? Math.Max(0m, d - paidByLoan.GetValueOrDefault(l.Id))
-            : l.Principal);
-
-        return (open.Count, total);
-    }
 }

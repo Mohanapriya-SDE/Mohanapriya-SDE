@@ -13,6 +13,13 @@ public class Loan
     public decimal EmiAmount { get; set; }
     public DateOnly StartDate { get; set; }
     public LoanStatus Status { get; set; }
+    public PrepaymentPolicy PrepaymentPolicy { get; set; } = PrepaymentPolicy.LenderChoice;
+    public DateTime CreatedAt { get; set; }
+    public DateOnly? ClosedDate { get; set; }
+    public string? ClosureRemarks { get; set; }
+
+    /// <summary>Concurrency token: replaced on every change so two concurrent postings cannot both succeed.</summary>
+    public Guid Version { get; set; } = Guid.NewGuid();
 
     public Lender Lender { get; set; } = null!;
     public Customer Customer { get; set; } = null!;

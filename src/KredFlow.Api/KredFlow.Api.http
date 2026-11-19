@@ -103,4 +103,61 @@ Authorization: Bearer {{accessToken}}
 GET {{KredFlow.Api_HostAddress}}/api/v1/customers/{{customerId}}/outstanding
 Authorization: Bearer {{accessToken}}
 
+### Create loan (EMI and schedule are calculated by the backend)
+# @name createLoan
+POST {{KredFlow.Api_HostAddress}}/api/v1/loans
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "customerId": "{{customerId}}",
+  "principalAmount": 100000,
+  "annualInterestRate": 12,
+  "tenureMonths": 12,
+  "startDate": "2026-11-15",
+  "prepaymentPolicy": "LenderChoice"
+}
+
+###
+@loanId = {{createLoan.response.body.id}}
+
+### Get loan
+GET {{KredFlow.Api_HostAddress}}/api/v1/loans/{{loanId}}
+Authorization: Bearer {{accessToken}}
+
+### List loans
+GET {{KredFlow.Api_HostAddress}}/api/v1/loans?status=Active&minPrincipal=50000&maxPrincipal=200000&startDateFrom=2026-01-01&startDateTo=2026-12-31&page=1&pageSize=20
+Authorization: Bearer {{accessToken}}
+
+### Repayment schedule
+GET {{KredFlow.Api_HostAddress}}/api/v1/loans/{{loanId}}/schedule
+Authorization: Bearer {{accessToken}}
+
+### Loan outstanding (asOfDate is optional)
+GET {{KredFlow.Api_HostAddress}}/api/v1/loans/{{loanId}}/outstanding?asOfDate=2026-12-15
+Authorization: Bearer {{accessToken}}
+
+### Prepayment (treatment is required for LenderChoice loans)
+POST {{KredFlow.Api_HostAddress}}/api/v1/loans/{{loanId}}/prepayments
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "amount": 20000,
+  "paymentDate": "2026-11-15",
+  "treatment": "ReduceTenure",
+  "paymentMethod": "BankTransfer",
+  "remarks": "Additional principal repayment"
+}
+
+### Close loan (Owner only)
+POST {{KredFlow.Api_HostAddress}}/api/v1/loans/{{loanId}}/close
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "closureDate": "2026-11-15",
+  "remarks": "All dues settled"
+}
+
 ###

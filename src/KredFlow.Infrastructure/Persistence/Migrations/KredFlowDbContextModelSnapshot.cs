@@ -206,6 +206,16 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                         .HasPrecision(5, 2)
                         .HasColumnType("numeric(5,2)");
 
+                    b.Property<DateOnly?>("ClosedDate")
+                        .HasColumnType("date");
+
+                    b.Property<string>("ClosureRemarks")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<Guid>("CustomerId")
                         .HasColumnType("uuid");
 
@@ -215,6 +225,11 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
 
                     b.Property<Guid>("LenderId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("PrepaymentPolicy")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
 
                     b.Property<decimal>("Principal")
                         .HasPrecision(18, 2)
@@ -231,11 +246,17 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                     b.Property<int>("TenureMonths")
                         .HasColumnType("integer");
 
+                    b.Property<Guid>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("uuid");
+
                     b.HasKey("Id");
 
                     b.HasIndex("CustomerId");
 
-                    b.HasIndex("LenderId");
+                    b.HasIndex("LenderId", "CustomerId");
+
+                    b.HasIndex("LenderId", "Status", "StartDate");
 
                     b.ToTable("Loans", (string)null);
                 });
@@ -278,6 +299,9 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                         .HasPrecision(18, 2)
                         .HasColumnType("numeric(18,2)");
 
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<Guid>("LoanId")
                         .HasColumnType("uuid");
 
@@ -285,6 +309,15 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                         .HasColumnType("date");
 
                     b.Property<string>("PaymentMethod")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("Remarks")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<string>("Type")
                         .IsRequired()
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)");
@@ -313,8 +346,13 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                         .HasPrecision(18, 2)
                         .HasColumnType("numeric(18,2)");
 
-                    b.Property<Guid>("ScheduleId")
+                    b.Property<Guid?>("ScheduleId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("Type")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)");
 
                     b.HasKey("Id");
 
@@ -341,8 +379,15 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                         .HasPrecision(18, 2)
                         .HasColumnType("numeric(18,2)");
 
+                    b.Property<bool>("IsSuperseded")
+                        .HasColumnType("boolean");
+
                     b.Property<Guid>("LoanId")
                         .HasColumnType("uuid");
+
+                    b.Property<decimal>("OpeningPrincipal")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("numeric(18,2)");
 
                     b.Property<decimal>("PrincipalDue")
                         .HasPrecision(18, 2)
@@ -355,7 +400,8 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("LoanId", "InstallmentNumber")
-                        .IsUnique();
+                        .IsUnique()
+                        .HasFilter("\"IsSuperseded\" = false");
 
                     b.ToTable("RepaymentSchedules", (string)null);
                 });
@@ -580,8 +626,7 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                     b.HasOne("KredFlow.Domain.Entities.RepaymentSchedule", "Schedule")
                         .WithMany("Allocations")
                         .HasForeignKey("ScheduleId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
+                        .OnDelete(DeleteBehavior.Restrict);
 
                     b.Navigation("Payment");
 

@@ -61,6 +61,6 @@ public class CustomerOutstandingResponse
     public Guid CustomerId { get; set; }
     public int OpenLoanCount { get; set; }
 
-    /// <summary>Unpaid schedule amounts across the customer's Active and Overdue loans.</summary>
+    /// <summary>Unpaid principal plus accrued unpaid interest across the customer's Active and Overdue loans.</summary>
     public decimal TotalOutstanding { get; set; }
 }

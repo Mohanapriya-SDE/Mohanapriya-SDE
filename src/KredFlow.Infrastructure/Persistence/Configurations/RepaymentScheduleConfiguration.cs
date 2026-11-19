@@ -13,7 +13,12 @@ public class RepaymentScheduleConfiguration : IEntityTypeConfiguration<Repayment
         builder.Property(x => x.PrincipalDue).HasPrecision(18, 2);
         builder.Property(x => x.InterestDue).HasPrecision(18, 2);
         builder.Property(x => x.TotalDue).HasPrecision(18, 2);
-        builder.HasIndex(x => new { x.LoanId, x.InstallmentNumber }).IsUnique();
+        builder.Property(x => x.OpeningPrincipal).HasPrecision(18, 2);
+
+        // A recast supersedes rows and reuses their numbers, so uniqueness only applies to current rows.
+        builder.HasIndex(x => new { x.LoanId, x.InstallmentNumber })
+            .IsUnique()
+            .HasFilter("\"IsSuperseded\" = false");
 
         builder.HasOne(x => x.Loan)
             .WithMany(x => x.RepaymentSchedules)

@@ -5,6 +5,7 @@ using KredFlow.Api.RateLimiting;
 using KredFlow.Application;
 using KredFlow.Application.Interfaces;
 using KredFlow.Application.Lenders;
+using KredFlow.Application.Loans;
 using KredFlow.Infrastructure;
 using KredFlow.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -53,6 +54,16 @@ builder.Services.AddOptions<LenderOptions>()
     .Validate(
         options => options.IsValid(),
         "Lenders:SupportedTimeZones must be non-empty, contain 'Asia/Kolkata' and list only time zones known to this machine.")
+    .ValidateOnStart();
+
+builder.Services.AddOptions<LoanOptions>()
+    .BindConfiguration(LoanOptions.SectionName)
+    .Validate(
+        o => o.MinPrincipal > 0 && o.MinPrincipal <= o.MaxPrincipal
+             && o.MinAnnualInterestRate > 0 && o.MinAnnualInterestRate <= o.MaxAnnualInterestRate
+             && o.MinTenureMonths > 0 && o.MinTenureMonths <= o.MaxTenureMonths
+             && o.MaxBackdatedDays >= 0 && o.MaxFutureDays >= 0,
+        "Loans limits must be positive and each minimum must not exceed its maximum.")
     .ValidateOnStart();
 
 builder.Services.AddApplication();

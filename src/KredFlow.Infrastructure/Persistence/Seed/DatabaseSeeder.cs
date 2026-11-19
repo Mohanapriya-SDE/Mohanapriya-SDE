@@ -177,7 +177,8 @@ public class DatabaseSeeder(
             AnnualInterestRate = rate,
             TenureMonths = tenure,
             EmiAmount = emi,
-            StartDate = startDate
+            StartDate = startDate,
+            CreatedAt = startDate.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc)
         };
 
         var loanSchedules = BuildSchedule(faker, loan);
@@ -214,7 +215,8 @@ public class DatabaseSeeder(
                     LoanId = loan.Id,
                     Amount = schedule.TotalDue,
                     PaymentDate = paymentDate,
-                    PaymentMethod = faker.Random.Enum<PaymentMethod>()
+                    PaymentMethod = faker.Random.Enum<PaymentMethod>(),
+                    CreatedAt = paymentDate.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc)
                 };
                 payments.Add(payment);
 
@@ -263,6 +265,7 @@ public class DatabaseSeeder(
         {
             var interest = Math.Round(balance * monthlyRate, 2);
             var principalDue = n == loan.TenureMonths ? balance : Math.Round(loan.EmiAmount - interest, 2);
+            var openingPrincipal = balance;
             balance -= principalDue;
 
             result.Add(new RepaymentSchedule
@@ -271,6 +274,7 @@ public class DatabaseSeeder(
                 LoanId = loan.Id,
                 InstallmentNumber = n,
                 DueDate = loan.StartDate.AddMonths(n),
+                OpeningPrincipal = openingPrincipal,
                 PrincipalDue = principalDue,
                 InterestDue = interest,
                 TotalDue = principalDue + interest

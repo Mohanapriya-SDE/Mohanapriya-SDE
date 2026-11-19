@@ -12,6 +12,7 @@ public class PaymentAllocationConfiguration : IEntityTypeConfiguration<PaymentAl
         builder.HasKey(x => x.Id);
         builder.Property(x => x.InterestAmount).HasPrecision(18, 2);
         builder.Property(x => x.PrincipalAmount).HasPrecision(18, 2);
+        builder.Property(x => x.Type).HasConversion<string>().HasMaxLength(30);
 
         builder.HasOne(x => x.Payment)
             .WithMany(x => x.Allocations)

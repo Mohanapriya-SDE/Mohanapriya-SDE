@@ -254,7 +254,7 @@ public sealed class CustomerApiTests(ApiFactory factory) : IClassFixture<ApiFact
     }
 
     [Fact]
-    public async Task Outstanding_SumsUnpaidScheduleAmountsOfOpenLoansOnly()
+    public async Task Outstanding_SumsUnpaidPrincipalAndAccruedInterestOfOpenLoansOnly()
     {
         var session = await RegisterAndLoginAsync();
         var customer = await CreateAsync(session);
@@ -279,7 +279,8 @@ public sealed class CustomerApiTests(ApiFactory factory) : IClassFixture<ApiFact
         var outstanding = (await response.Content.ReadFromJsonAsync<CustomerOutstandingResponse>())!;
         Assert.Equal(customer.Id, outstanding.CustomerId);
         Assert.Equal(2, outstanding.OpenLoanCount);
-        Assert.Equal(10_900m, outstanding.TotalOutstanding);
+        // Scheduled loan: 10,000 - 800 paid principal + 90 interest of the second installment, already due. Plus 10,000.
+        Assert.Equal(19_290m, outstanding.TotalOutstanding);
     }
 
     [Fact]

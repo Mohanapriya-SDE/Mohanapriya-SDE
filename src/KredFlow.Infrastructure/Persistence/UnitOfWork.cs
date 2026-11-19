@@ -9,8 +9,19 @@ public class UnitOfWork(KredFlowDbContext db) : IUnitOfWork
 {
     private const string UniqueViolationSqlState = "23505";
 
-    public Task SaveChangesAsync(CancellationToken cancellationToken = default) =>
-        db.SaveChangesAsync(cancellationToken);
+    private const string ConcurrencyMessage = "The record was changed by another request. Reload it and try again.";
+
+    public async Task SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            throw new ConflictException(ConcurrencyMessage);
+        }
+    }
 
     public async Task ExecuteInTransactionAsync(Func<CancellationToken, Task> action, CancellationToken cancellationToken = default)
     {
@@ -22,6 +33,10 @@ public class UnitOfWork(KredFlowDbContext db) : IUnitOfWork
                 await action(cancellationToken);
                 await transaction.CommitAsync(cancellationToken);
             });
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            throw new ConflictException(ConcurrencyMessage);
         }
         catch (DbUpdateException ex) when (ex.InnerException is DbException { SqlState: UniqueViolationSqlState })
         {

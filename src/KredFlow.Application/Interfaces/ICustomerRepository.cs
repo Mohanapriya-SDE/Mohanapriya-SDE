@@ -15,6 +15,6 @@ public interface ICustomerRepository
 
     Task<IReadOnlyList<Loan>> GetLoansAsync(Guid customerId, CancellationToken cancellationToken = default);
 
-    /// <summary>Open (Active or Overdue) loan count and the unpaid schedule amount across them.</summary>
-    Task<(int OpenLoanCount, decimal TotalOutstanding)> GetOutstandingAsync(Guid customerId, CancellationToken cancellationToken = default);
+    /// <summary>The customer's Active and Overdue loans.</summary>
+    Task<IReadOnlyList<Loan>> GetOpenLoansAsync(Guid customerId, CancellationToken cancellationToken = default);
 }

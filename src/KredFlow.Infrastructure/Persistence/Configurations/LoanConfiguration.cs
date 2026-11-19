@@ -14,6 +14,12 @@ public class LoanConfiguration : IEntityTypeConfiguration<Loan>
         builder.Property(x => x.AnnualInterestRate).HasPrecision(5, 2);
         builder.Property(x => x.EmiAmount).HasPrecision(18, 2);
         builder.Property(x => x.Status).HasConversion<string>().HasMaxLength(20);
+        builder.Property(x => x.PrepaymentPolicy).HasConversion<string>().HasMaxLength(20);
+        builder.Property(x => x.ClosureRemarks).HasMaxLength(500);
+        builder.Property(x => x.Version).IsConcurrencyToken();
+
+        builder.HasIndex(x => new { x.LenderId, x.CustomerId });
+        builder.HasIndex(x => new { x.LenderId, x.Status, x.StartDate });
 
         builder.HasOne(x => x.Lender)
             .WithMany(x => x.Loans)
