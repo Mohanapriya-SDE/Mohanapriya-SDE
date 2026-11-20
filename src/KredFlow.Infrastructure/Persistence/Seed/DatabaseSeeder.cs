@@ -202,6 +202,7 @@ public class DatabaseSeeder(
             TransactionDate = startDate
         });
 
+        DateOnly? lastPaymentDate = null;
         for (var n = 0; n < dueSchedules.Count; n++)
         {
             var schedule = dueSchedules[n];
@@ -209,6 +210,7 @@ public class DatabaseSeeder(
             if (n < paidCount)
             {
                 var paymentDate = Min(schedule.DueDate.AddDays(faker.Random.Int(0, 3)), today);
+                lastPaymentDate = paymentDate;
                 var payment = new Payment
                 {
                     Id = faker.Random.Guid(),
@@ -249,6 +251,11 @@ public class DatabaseSeeder(
                     TransactionDate = Min(schedule.DueDate.AddDays(7), today)
                 });
             }
+        }
+
+        if (loan.Status == LoanStatus.Closed)
+        {
+            loan.ClosedDate = lastPaymentDate;
         }
 
         loans.Add(loan);

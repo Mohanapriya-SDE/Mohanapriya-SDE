@@ -1233,6 +1233,101 @@ curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$F/prepayments -H "Authorization
 
 A `Staff` user gets `403` on `close` (the `token` function registers owners, so create a staff user in the database to try it, or rely on `LoanApiTests.Close_IsOwnerOnly`).
 
+### 8. Seeded loans (Development only)
+
+The seeder creates 15 loans spread across the `Closed`, `Active`, `Overdue` and `Defaulted` statuses (see [Development seed data](#development-seed-data)), so you can test existing loans without creating any. Seeded `Closed` loans have a `closedDate` equal to their last payment (databases seeded before this was added show `null`; reset to get it). These helpers pick a loan by status and log in as the lender that owns it. Seeded loans are deterministic, so the ids are the same on every freshly seeded database, but the dates move with today's date, so select by status rather than copying ids.
+
+```bash
+B=http://localhost:5208/api/v1
+J='Content-Type: application/json'
+TODAY=$(date +%F)
+PSQL="psql -U mohanac -d kredflow_advanced_api -Atc"
+
+# pick <Status>: id of a seeded loan with that status
+pick() { $PSQL "select \"Id\" from \"Loans\" where \"Status\" = '$1' order by \"Id\" limit 1"; }
+
+# tok <loanId>: access token of the seeded owner of that loan's lender (password is public: see Development seed data)
+tok() {
+  local email; email=$($PSQL "select u.\"Email\" from \"Users\" u join \"Loans\" l on l.\"LenderId\" = u.\"LenderId\" where l.\"Id\" = '$1' limit 1")
+  curl -s -X POST $B/auth/login -H "$J" -d '{"email":"'"$email"'","password":"KredFlow@Dev2026!"}' | sed -E 's/.*"accessToken":"([^"]+)".*/\1/'
+}
+```
+
+Define them again in each new terminal. A `401` from `tok` means the database was seeded before the auth migration; reset it as described in [Reset the local database](#reset-the-local-database).
+
+**A. Closed loan: everything paid, nothing can change**
+
+```bash
+CL=$(pick Closed); TC=$(tok $CL)
+curl -s $B/loans/$CL -H "Authorization: Bearer $TC"                          # status Closed
+curl -s $B/loans/$CL/schedule -H "Authorization: Bearer $TC"                 # every row Paid, remainingAmount 0
+curl -s $B/loans/$CL/outstanding -H "Authorization: Bearer $TC"              # principal, interest and overdue all 0
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$CL/close -H "Authorization: Bearer $TC" -H "$J" \
+  -d '{"closureDate":"'$TODAY'"}'                                            # expect 409 "already closed"
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$CL/prepayments -H "Authorization: Bearer $TC" -H "$J" \
+  -d '{"amount":20000,"paymentDate":"'$TODAY'","treatment":"ReduceTenure"}'  # expect 422 "A closed loan cannot be prepaid"
+```
+
+**B. Overdue loan: arrears block prepayment and closing**
+
+```bash
+OV=$(pick Overdue); TO=$(tok $OV)
+curl -s $B/loans/$OV/outstanding -H "Authorization: Bearer $TO"              # overdueAmount > 0, accruedUnpaidInterest > 0
+curl -s $B/loans/$OV/schedule -H "Authorization: Bearer $TO" | python3 -c 'import sys,json; [print(r["installmentNumber"], r["dueDate"], r["paidAmount"], r["remainingAmount"], r["paymentStatus"]) for r in json.load(sys.stdin)]'
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$OV/prepayments -H "Authorization: Bearer $TO" -H "$J" \
+  -d '{"amount":5000,"paymentDate":"'$TODAY'","treatment":"ReduceTenure"}'   # expect 422 "Installments due ... must be settled"
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$OV/close -H "Authorization: Bearer $TO" -H "$J" \
+  -d '{"closureDate":"'$TODAY'"}'                                            # expect 422 listing principal, interest and penalties
+```
+
+The unpaid rows show `Overdue`, and `overdueAmount` equals the sum of their `remainingAmount`. Seeded overdue and defaulted loans also carry `Penalty` ledger entries, so even after the arrears are paid they cannot be closed until a waiver exists.
+
+**C. Defaulted loan**
+
+```bash
+DF=$(pick Defaulted); TD=$(tok $DF)
+curl -s $B/loans/$DF -H "Authorization: Bearer $TD"                          # status Defaulted
+curl -s $B/loans/$DF/outstanding -H "Authorization: Bearer $TD"              # larger overdueAmount than a plain Overdue loan
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$DF/prepayments -H "Authorization: Bearer $TD" -H "$J" \
+  -d '{"amount":5000,"paymentDate":"'$TODAY'","treatment":"ReduceEmi"}'     # expect 422, arrears
+```
+
+**D. Active loan, on schedule: prepayment works**
+
+```bash
+AC=$(pick Active); TA2=$(tok $AC)
+curl -s $B/loans/$AC/outstanding -H "Authorization: Bearer $TA2"            # overdueAmount 0, principalOutstanding > 0
+curl -s $B/loans/$AC -H "Authorization: Bearer $TA2"                        # note tenureMonths, emiAmount and prepaymentPolicy (LenderChoice)
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$AC/prepayments -H "Authorization: Bearer $TA2" -H "$J" \
+  -d '{"amount":20000,"paymentDate":"'$TODAY'"}'                            # expect 400, treatment required
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$AC/prepayments -H "Authorization: Bearer $TA2" -H "$J" \
+  -d '{"amount":20000,"paymentDate":"'$TODAY'","treatment":"ReduceTenure"}' # expect 201
+curl -s $B/loans/$AC -H "Authorization: Bearer $TA2"                        # tenureMonths lower, emiAmount unchanged
+curl -s $B/loans/$AC/outstanding -H "Authorization: Bearer $TA2"            # principalOutstanding 20000 lower
+```
+
+This changes the seeded data, which is fine for a development database. To undo it, reset the database. A seeded loan can also have its last installment due today and unpaid; in that case the prepayment returns `422`, so pick another `Active` loan (`limit 1 offset 1`).
+
+**E. Isolation between the two seeded lenders**
+
+```bash
+OTHER=$($PSQL "select u.\"Email\" from \"Users\" u where u.\"LenderId\" <> (select \"LenderId\" from \"Loans\" where \"Id\" = '$CL') limit 1")
+TX=$(curl -s -X POST $B/auth/login -H "$J" -d '{"email":"'"$OTHER"'","password":"KredFlow@Dev2026!"}' | sed -E 's/.*"accessToken":"([^"]+)".*/\1/')
+curl -s -w ' [%{http_code}]\n' $B/loans/$CL -H "Authorization: Bearer $TX"                # expect 404, not 403
+curl -s -w ' [%{http_code}]\n' $B/loans/$CL/schedule -H "Authorization: Bearer $TX"       # expect 404
+curl -s "$B/loans?status=Closed&pageSize=100" -H "Authorization: Bearer $TX" | grep -c "$CL"   # expect 0
+```
+
+**F. List the seeded portfolio**
+
+```bash
+curl -s "$B/loans?status=Overdue" -H "Authorization: Bearer $TO"             # only this lender's overdue loans
+curl -s "$B/loans?minPrincipal=500000&pageSize=5" -H "Authorization: Bearer $TO"
+curl -s "$B/loans?startDateFrom=2025-01-01&startDateTo=$TODAY&page=1&pageSize=3" -H "Authorization: Bearer $TO"
+```
+
+Each lender sees only its own loans, so the totals differ per token.
+
 ### Clean up
 
 Loans belong to the throwaway lenders, so extend the [auth cleanup](#clean-up-test-records). Delete in dependency order before the customers and lenders:
