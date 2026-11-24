@@ -6,5 +6,8 @@ public enum AllocationType
     Installment,
 
     /// <summary>Principal paid ahead of the schedule; it belongs to no row.</summary>
-    PrincipalPrepayment
+    PrincipalPrepayment,
+
+    /// <summary>Applied to a penalty.</summary>
+    Penalty
 }

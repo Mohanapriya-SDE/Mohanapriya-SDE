@@ -5,5 +5,6 @@ public enum TransactionType
     Disbursement,
     Repayment,
     Penalty,
-    Waiver
+    Waiver,
+    Reversal
 }

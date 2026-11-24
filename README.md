@@ -13,7 +13,8 @@ Built with ASP.NET Core (.NET 10), EF Core 10, PostgreSQL, ASP.NET Core Identity
 | Domain model, migrations, development seed data | Implemented |
 | Customer management API (`/customers`) | Implemented |
 | Loan management API (`/loans`): create with schedule, read, list, schedule, outstanding, close, prepayment | Implemented |
-| Payment (regular payments, reversals) and Reporting APIs | Not started |
+| Payment management (`/payments`, `/loans/{id}/payments`, `/loans/{id}/penalties`): recording, allocation, reversal, history, penalties and waivers | Implemented |
+| Reporting APIs | Not started |
 | Refresh tokens and logout | Not started |
 
 ## Solution layout
@@ -40,9 +41,13 @@ Dependencies point inward: `Api` -> `Application`/`Infrastructure` -> `Domain`. 
 | `Customer` | A borrower of a lender. Has `FullName`, `PhoneNumber` (not unique), `Address`, `IsActive` (soft deactivation) and `CreatedAt`. |
 | `Loan` | Principal, annual interest rate, tenure, EMI, start date and status (`Active`, `Closed`, `Overdue`, `Defaulted`). Also `PrepaymentPolicy` (`ReduceTenure`, `ReduceEmi`, `LenderChoice`), `CreatedAt`, `ClosedDate`, `ClosureRemarks` and a concurrency `Version`. `TenureMonths` and `EmiAmount` hold the current values, so a prepayment recast updates them. |
 | `RepaymentSchedule` | One row per monthly installment (opening principal, principal, interest, total due, due date). A prepayment recast marks replaced rows `IsSuperseded` instead of deleting them; only current rows are shown and counted. Paid and remaining amounts are never stored: they are summed from allocations. |
-| `Payment` | Money received for a loan (amount, date, method: `Cash`, `UPI`, `BankTransfer`, ...), a `Type` (`Regular`, `Prepayment`), `Remarks` and `CreatedAt`. |
-| `PaymentAllocation` | How a payment is split between interest and principal. Either applied to a schedule row (`Installment`) or principal paid ahead of the schedule (`PrincipalPrepayment`, no schedule row). |
-| `LoanTransaction` | Ledger entries for a loan: `Disbursement`, `Repayment`, `Penalty`. |
+| `Payment` | Money received for a loan (amount, date, method: `Cash`, `UPI`, `BankTransfer`, ...), a `Type` (`Regular`, `Prepayment`), `ReferenceNumber`, `Remarks`, an `IdempotencyKey` (unique per loan) with a fingerprint of its request, and `CreatedAt`. A payment is never deleted or edited. Its status is derived: `Reversed` if a `PaymentReversal` exists, otherwise `Recorded`. |
+| `PaymentAllocation` | How a payment is split into `InterestAmount`, `PenaltyAmount` and `PrincipalAmount`. It is applied to a schedule row (`Installment`), to a penalty (`Penalty`), or is principal paid ahead of the schedule (`PrincipalPrepayment`, no row). Allocations of reversed payments stop counting toward every balance, but are kept. |
+| `PaymentReversal` | Why and when a payment was reversed (`Reason`, `ReversalDate`, who). Unique per payment, so a payment can only be reversed once. |
+| `Penalty` | A charge on a loan (amount, assessed date, optional installment). Paid, waived and outstanding amounts are derived from allocations and waivers, never stored. |
+| `PenaltyWaiver` | A full or partial waiver of one penalty, with a `Reason` and who made it. |
+| `LoanRecast` | What a prepayment did to the loan (treatment, previous and new EMI and tenure, principal after). It is what lets a prepayment be reversed. |
+| `LoanTransaction` | Ledger entries for a loan: `Disbursement`, `Repayment`, `Penalty`, `Waiver`, `Reversal`. `ReferenceId` points at the payment, penalty or waiver it belongs to. Amounts are positive; the type gives the direction. Balances are derived from allocations and waivers, not from the ledger. |
 
 Conventions: UUID primary keys, money as `decimal` (`NUMERIC(18,2)`), business dates as `DateOnly`, timestamps in UTC, enums stored as strings. Deleting a lender, customer or loan is blocked by restrictive foreign keys, so historical financial data is never lost.
 
@@ -109,6 +114,7 @@ All settings live in [src/KredFlow.Api/appsettings.json](src/KredFlow.Api/appset
 | `Loans:MinTenureMonths` / `MaxTenureMonths` | `1` / `360` | Allowed tenure. |
 | `Loans:MaxBackdatedDays` / `MaxFutureDays` | `365` / `30` | How far from the lender's today a loan's start date may be. |
 | `Loans:DefaultPrepaymentPolicy` | `LenderChoice` | Policy given to a loan created without one. The app fails to start if a minimum exceeds its maximum. |
+| `Loans:PenaltyClosurePolicy` | `BlockUntilPaidOrWaived` | `BlockUntilPaidOrWaived` stops a loan with an outstanding penalty from closing. `IgnorePenalties` lets it close and leaves the penalties, waivers and ledger untouched. |
 | `RateLimiting:Login:PermitLimit` / `WindowSeconds` | `5` / `60` | Login attempts per client IP. |
 | `RateLimiting:Register:PermitLimit` / `WindowSeconds` | `3` / `600` | Registrations per client IP. |
 
@@ -526,13 +532,14 @@ Accrual is **per installment**, not daily:
 { "closureDate": "2027-11-15", "remarks": "All dues settled" }
 ```
 
-Returns `200` with the `LoanResponse` (`status` `Closed`, `closedDate` set). The loan must have no principal, no accrued interest as of `closureDate`, and no net penalties (penalty entries minus waivers). Otherwise `422` lists the amounts still due.
+Returns `200` with the `LoanResponse` (`status` `Closed`, `closedDate` set). The loan must have no principal and no accrued interest as of `closureDate`. With `Loans:PenaltyClosurePolicy` set to `BlockUntilPaidOrWaived` (the default) it must also have no outstanding penalty. Otherwise `422` lists the amounts still due.
 
 | Rule | Result |
 |---|---|
 | Loan already closed | `409` |
 | `closureDate` in the future, before the start date, or before the last payment | `422` |
-| Penalties not waived | `422`. There is no way to pay a penalty yet, so a penalized loan can only be closed after a waiver entry exists |
+| A penalty is outstanding (default policy) | `422`. Pay it with a [payment](#payment-api) or waive it first |
+| `IgnorePenalties` policy | The loan closes. Penalties are never erased: they stay listed with their outstanding amount |
 | Not an `Owner` | `403` |
 
 ### Prepayment
@@ -545,11 +552,12 @@ Returns `200` with the `LoanResponse` (`status` `Closed`, `closedDate` set). The
   "paymentDate": "2027-02-15",
   "treatment": "ReduceTenure",
   "paymentMethod": "BankTransfer",
-  "remarks": "Additional principal repayment"
+  "remarks": "Additional principal repayment",
+  "idempotencyKey": "prepay-2027-02-15-001"
 }
 ```
 
-A prepayment is posted as a `Payment` of type `Prepayment`, with its allocations and a `Repayment` ledger entry. `paymentMethod` defaults to `Cash`. The response (`201`) shows what happened:
+A prepayment is posted as a `Payment` of type `Prepayment`, with its allocations, a recast record and a `Repayment` ledger entry. `paymentMethod` defaults to `Cash`. `idempotencyKey` is optional (max 100 characters); repeating a request with the same key returns `200` with the original result instead of posting twice, and the same key with different content returns `409`. The response (`201`) shows what happened:
 
 ```json
 {
@@ -578,7 +586,7 @@ For the two fixed policies `treatment` may be omitted; a different value returns
 
 **How it is posted:**
 
-1. Every installment due on or before `paymentDate` must already be fully paid, otherwise `422` (a prepayment never hides arrears).
+1. Every installment due on or before `paymentDate` must already be fully paid, and no penalty may be outstanding, otherwise `422` (a prepayment never hides arrears). Settle them with a regular [payment](#payment-api) first.
 2. If a future installment is partly paid, the amount settles it first (interest, then principal).
 3. The rest is recorded as principal paid ahead of the schedule, as an allocation with no schedule row.
 4. Installments after the last due or part-paid one are marked superseded and regenerated on the new balance, continuing the numbering. Interest is recomputed on the lower balance from the next unpaid installment, so there is no daily or pro-rata interest. Superseded rows are kept for audit.
@@ -592,7 +600,7 @@ For the two fixed policies `treatment` may be omitted; a different value returns
 | Loan closed | `422` |
 | A concurrent change to the same loan | `409`; reload and retry |
 
-Paying off the entire balance leaves no installments; the loan stays `Active` until it is closed explicitly.
+Paying off the entire balance leaves no installments; the loan stays `Active` until it is closed explicitly. A prepayment can be [reversed](#reverse-a-payment) while no later payment exists; the original schedule, EMI and tenure are restored.
 
 ### Errors
 
@@ -604,6 +612,178 @@ Paying off the entire balance leaves no installments; the loan stays `Active` un
 | `404` | Loan or customer not found, **or owned by another lender** (deliberately identical) |
 | `409` | Loan already closed, or the loan was changed by another request |
 | `422` | Inactive customer, outstanding dues, penalties, or an invalid prepayment |
+
+## Payment API
+
+Payments settle what a loan owes. Every endpoint is scoped to the caller's lender; a payment, penalty or loan of another lender is reported as `404`, the same as an unknown id. Balances are never stored: outstanding amounts, schedule statuses and penalty balances are always derived from allocations, waivers and reversals, so recording or reversing a payment only has to write correct allocation rows.
+
+| Method and path | Role | Success | Failure |
+|---|---|---|---|
+| `POST /api/v1/loans/{loanId}/payments` | Any | `201 Created` (`200` on an idempotent replay) | `400`, `401`, `404`, `409`, `422` |
+| `GET /api/v1/payments/{paymentId}` | Any | `200 OK` | `401`, `404` |
+| `GET /api/v1/loans/{loanId}/payments` | Any | `200 OK` (`PagedResponse`) | `400`, `401`, `404` |
+| `GET /api/v1/customers/{customerId}/payments` | Any | `200 OK` (`PagedResponse`) | `400`, `401`, `404` |
+| `POST /api/v1/payments/{paymentId}/reversals` | `Owner` | `201 Created` | `400`, `401`, `403`, `404`, `409`, `422` |
+| `GET /api/v1/loans/{loanId}/penalties` | Any | `200 OK` | `401`, `404` |
+| `POST /api/v1/loans/{loanId}/penalties` | `Owner` | `201 Created` | `400`, `401`, `403`, `404`, `422` |
+| `POST /api/v1/loans/{loanId}/penalties/{penaltyId}/waivers` | `Owner` | `201 Created` | `400`, `401`, `403`, `404`, `422` |
+
+### Record a payment
+
+`POST /api/v1/loans/{loanId}/payments`:
+
+```json
+{
+  "amount": 10000,
+  "paymentDate": "2026-11-24",
+  "paymentMethod": "Cash",
+  "referenceNumber": null,
+  "remarks": "November EMI",
+  "idempotencyKey": "payment-request-unique-001"
+}
+```
+
+| Field | Rule |
+|---|---|
+| `amount` | Greater than 0, at most 2 decimals. Must not exceed the total still payable (see below) |
+| `paymentDate` | Not in the future (lender's time zone), not before the loan start, and not before the last non-reversed payment's date |
+| `paymentMethod` | `Cash`, `UPI`, `BankTransfer` or `Cheque` |
+| `referenceNumber` | Optional, max 100 characters |
+| `remarks` | Optional, max 500 characters |
+| `idempotencyKey` | Required, max 100 characters |
+
+The loan must not be closed (`422`). The payment, its allocations and a `Repayment` ledger entry are written in **one transaction**.
+
+**Allocation order.** As of `paymentDate`, oldest first within each step:
+
+1. Interest due on installments due on or before the payment date.
+2. Outstanding penalties.
+3. Principal due on those installments.
+4. Any remainder is an **advance** on upcoming installments, interest before principal. The schedule is not recast; only the [prepayments endpoint](#prepayment) recasts.
+
+Example: a customer owes interest 2,000, a penalty of 500 and principal 20,000, and pays 10,000. It allocates interest 2,000, penalty 500 and principal 7,500.
+
+The amount can never exceed everything still payable: the unpaid balance of every current installment plus outstanding penalties. A larger amount returns `422` and nothing is saved, so there are no customer credit balances to track. Partial payments are fine; a penalty can be paid down across several payments.
+
+```json
+{
+  "id": "5ba95ce6-...",
+  "loanId": "254c829a-...",
+  "customerId": "bee0584b-...",
+  "amount": 5000,
+  "paymentDate": "2026-11-24",
+  "paymentMethod": "UPI",
+  "type": "Regular",
+  "status": "Recorded",
+  "referenceNumber": "UPI-1",
+  "remarks": null,
+  "createdAt": "2026-11-24T10:18:02Z",
+  "interestAllocated": 1481.51,
+  "penaltyAllocated": 69.34,
+  "principalAllocated": 3449.15,
+  "allocations": [
+    { "allocationType": "Installment", "installmentNumber": 9, "penaltyId": null, "interestAmount": 509.20, "penaltyAmount": 0, "principalAmount": 1224.07 },
+    { "allocationType": "Penalty", "installmentNumber": null, "penaltyId": "a47617ac-...", "interestAmount": 0, "penaltyAmount": 34.67, "principalAmount": 0 }
+  ],
+  "reversal": null
+}
+```
+
+**Idempotency.** Send a new `idempotencyKey` for each real payment and reuse it when retrying after a timeout.
+
+| Request | Result |
+|---|---|
+| New key | `201`, the payment is posted |
+| Same key, same content | `200` with the original payment; nothing is posted again (it works even if the loan has since been closed) |
+| Same key, different content | `409`; nothing is posted |
+| Same key on a different loan | Independent: keys are scoped to a loan |
+
+Every posting also changes the loan's concurrency version, so two simultaneous payments on the same loan cannot both succeed: one returns `409`, and retrying it (with the same key) returns the stored result or posts it.
+
+### Get and list payments
+
+`GET /api/v1/payments/{paymentId}` returns the payment above, including `allocations` and, if reversed, the `reversal`.
+
+`GET /api/v1/loans/{loanId}/payments` and `GET /api/v1/customers/{customerId}/payments` (every loan of the customer) return a `PagedResponse` of payment summaries (no allocations), newest first.
+
+| Query parameter | Rule |
+|---|---|
+| `status` | `Recorded` or `Reversed` |
+| `paymentMethod` | `Cash`, `UPI`, `BankTransfer` or `Cheque` |
+| `from`, `to` | Inclusive payment dates `yyyy-MM-dd`; `from` must not be after `to` |
+| `page`, `pageSize` | `1` or more, default 20, max 100 |
+
+### Reverse a payment
+
+`POST /api/v1/payments/{paymentId}/reversals` (Owner only):
+
+```json
+{ "reason": "Cheque bounced", "reversalDate": "2026-11-26" }
+```
+
+A payment is never deleted or edited. A reversal adds a `PaymentReversal` row and a `Reversal` ledger entry, and the payment's allocations stop counting toward every balance, so outstanding, schedule statuses and penalty balances return to what they were. The response is the payment with `status` `Reversed`.
+
+| Rule | Result |
+|---|---|
+| `reason` empty or over 500 characters | `400` |
+| Payment already reversed | `409` |
+| `reversalDate` in the future or before the payment date | `422` |
+| Loan is closed | `422` (reopening a loan is not supported) |
+| A regular payment, but a later non-reversed **prepayment** exists | `422`: reverse the prepayment first |
+| A prepayment, but any later non-reversed payment exists | `422`: reverse the later payments first |
+| A prepayment made before recast tracking existed | `422` |
+| Not an `Owner` | `403` |
+
+Reversing a regular payment does not re-flow later payments: each keeps the allocation it was given when it was recorded. Reversing a prepayment retires the installments its recast generated, restores the installments it replaced, and puts back the previous EMI and tenure.
+
+### Penalties and waivers
+
+`GET /api/v1/loans/{loanId}/penalties` lists a loan's penalties, oldest first:
+
+```json
+[
+  {
+    "id": "a47617ac-...",
+    "loanId": "254c829a-...",
+    "installmentNumber": 9,
+    "assessedDate": "2026-10-31",
+    "amount": 34.67,
+    "paidAmount": 0,
+    "waivedAmount": 0,
+    "outstandingAmount": 34.67,
+    "createdAt": "2026-10-31T00:00:00Z"
+  }
+]
+```
+
+`outstandingAmount` is `amount - paidAmount - waivedAmount`, derived on every request from allocations of non-reversed payments and from waivers.
+
+`POST /api/v1/loans/{loanId}/penalties` (Owner only) assesses a penalty and writes a `Penalty` ledger entry:
+
+```json
+{ "amount": 250.50, "assessedDate": "2026-11-24", "installmentNumber": 9 }
+```
+
+`amount` is greater than 0 and at most 10,000,000 with at most 2 decimals; `assessedDate` is between the loan start and today; `installmentNumber` is optional and must exist on the current schedule (`422` otherwise). A closed loan cannot be assessed (`422`).
+
+`POST /api/v1/loans/{loanId}/penalties/{penaltyId}/waivers` (Owner only) waives all or part of a penalty:
+
+```json
+{ "amount": 100, "reason": "Customer hardship" }
+```
+
+A waiver cannot exceed the penalty's outstanding amount (`422`) and needs a `reason` (max 500 characters). It writes a `PenaltyWaiver` row and a `Waiver` ledger entry, records who made it, and is final: waivers cannot be reversed. A penalty id from another loan returns `404`.
+
+### Errors
+
+| Status | When |
+|---|---|
+| `400` | Invalid request; the body has an `errors` object keyed by field |
+| `401` | Missing, invalid or expired token |
+| `403` | Reversing, assessing or waiving without the `Owner` role |
+| `404` | Loan, customer, payment or penalty not found, **or owned by another lender** |
+| `409` | Idempotency key reused for a different request, payment already reversed, or the loan was changed by another request |
+| `422` | Amount above the total payable, bad dates, closed loan, or a reversal or waiver rule above |
 
 ## Error responses
 
@@ -703,7 +883,7 @@ In the `Development` environment, `DatabaseSeeder` inserts sample data once, whe
 
 - 2 lenders, each with an owner login
 - 10 customers and 15 loans, covering the closed, active, overdue and defaulted statuses
-- Repayment schedules, payments, allocations and ledger transactions for those loans
+- Repayment schedules, payments, allocations, penalties (for missed installments) and ledger transactions for those loans
 
 Seed lenders and logins (password for both: `KredFlow@Dev2026!`):
 
@@ -1062,19 +1242,14 @@ loan() {
     | sed -E 's/.*"id":"([^"]+)".*/\1/'
 }
 
-# Stand-in for the Payment module: record a full payment of one installment
+# Record a payment on a loan: pay <loanId> <amount>
 pay() {
-  psql -U mohanac -d kredflow_advanced_api -c "
-  with r as (select \"Id\", \"LoanId\", \"PrincipalDue\", \"InterestDue\", \"TotalDue\" from \"RepaymentSchedules\"
-             where \"LoanId\" = '$1' and \"InstallmentNumber\" = $2 and not \"IsSuperseded\"),
-       p as (insert into \"Payments\"(\"Id\", \"LoanId\", \"Amount\", \"PaymentDate\", \"PaymentMethod\", \"Type\", \"CreatedAt\")
-             select gen_random_uuid(), \"LoanId\", \"TotalDue\", current_date, 'Cash', 'Regular', now() from r returning \"Id\")
-  insert into \"PaymentAllocations\"(\"Id\", \"PaymentId\", \"ScheduleId\", \"InterestAmount\", \"PrincipalAmount\", \"Type\")
-  select gen_random_uuid(), p.\"Id\", r.\"Id\", r.\"InterestDue\", r.\"PrincipalDue\", 'Installment' from p, r;"
+  curl -s -X POST $B/loans/$1/payments -H "Authorization: Bearer $TA" -H "$J" \
+    -d '{"amount":'$2',"paymentDate":"'$TODAY'","paymentMethod":"Cash","idempotencyKey":"'$(uuidgen)'"}'
 }
 ```
 
-The payment endpoints do not exist yet, so `pay` writes a payment and its allocation straight to the database. Define both functions again in each new terminal.
+`pay` uses the [payment API](#payment-api); see [Testing the payment API](#testing-the-payment-api) for the payment scenarios in detail. Define both functions again in each new terminal.
 
 ### 1. Create a loan
 
@@ -1159,15 +1334,15 @@ curl -s $B/loans/$O/outstanding -H "Authorization: Bearer $TA"
 
 Expected: `principalOutstanding` `100000`, `accruedUnpaidInterest` is the interest of the three past rows, `overdueAmount` is 3 x `8884.88` = `26654.64`. In the schedule the first three rows are `Overdue`, the rest `Upcoming`.
 
-Record a payment of installment 1 and look again:
+Pay installment 1 in full. Interest on the three overdue rows is settled first, so the amount is their interest (`2762.66`) plus row 1's principal (`7884.88`):
 
 ```bash
-pay $O 1
+pay $O 10647.54 > /dev/null
 curl -s $B/loans/$O/schedule -H "Authorization: Bearer $TA" | python3 -c 'import sys,json; [print(r["installmentNumber"], r["paidAmount"], r["remainingAmount"], r["paymentStatus"]) for r in json.load(sys.stdin)[:4]]'
 curl -s $B/loans/$O/outstanding -H "Authorization: Bearer $TA"
 ```
 
-Expected: row 1 is `Paid` with `remainingAmount` `0`, rows 2 and 3 stay `Overdue`; `principalOutstanding` drops by row 1's principal (`7884.88`); `overdueAmount` drops to 2 x `8884.88`.
+Expected: row 1 is `Paid` with `remainingAmount` `0`; rows 2 and 3 are partly paid (their interest) and stay `Overdue` with only their principal remaining; `principalOutstanding` drops by row 1's principal to `92115.12`; `accruedUnpaidInterest` is `0`; `overdueAmount` is `16007.10`, the two principals left.
 
 `asOfDate` changes what has accrued without changing any data:
 
@@ -1280,7 +1455,7 @@ curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$OV/close -H "Authorization: Bea
   -d '{"closureDate":"'$TODAY'"}'                                            # expect 422 listing principal, interest and penalties
 ```
 
-The unpaid rows show `Overdue`, and `overdueAmount` equals the sum of their `remainingAmount`. Seeded overdue and defaulted loans also carry `Penalty` ledger entries, so even after the arrears are paid they cannot be closed until a waiver exists.
+The unpaid rows show `Overdue`, and `overdueAmount` equals the sum of their `remainingAmount`. Seeded overdue and defaulted loans also carry penalties, so even after the arrears are paid they cannot be closed until the penalties are paid or waived (see [Testing the payment API](#testing-the-payment-api)).
 
 **C. Defaulted loan**
 
@@ -1335,16 +1510,253 @@ Loans belong to the throwaway lenders, so extend the [auth cleanup](#clean-up-te
 ```bash
 psql -U mohanac -d kredflow_advanced_api <<'SQL'
 BEGIN;
-DELETE FROM "PaymentAllocations" WHERE "PaymentId" IN (SELECT p."Id" FROM "Payments" p JOIN "Loans" l ON l."Id" = p."LoanId" JOIN "Lenders" le ON le."Id" = l."LenderId" WHERE le."OwnerName" = 'Ravi');
-DELETE FROM "Payments" WHERE "LoanId" IN (SELECT l."Id" FROM "Loans" l JOIN "Lenders" le ON le."Id" = l."LenderId" WHERE le."OwnerName" = 'Ravi');
-DELETE FROM "LoanTransactions" WHERE "LoanId" IN (SELECT l."Id" FROM "Loans" l JOIN "Lenders" le ON le."Id" = l."LenderId" WHERE le."OwnerName" = 'Ravi');
-DELETE FROM "RepaymentSchedules" WHERE "LoanId" IN (SELECT l."Id" FROM "Loans" l JOIN "Lenders" le ON le."Id" = l."LenderId" WHERE le."OwnerName" = 'Ravi');
-DELETE FROM "Loans" WHERE "LenderId" IN (SELECT "Id" FROM "Lenders" WHERE "OwnerName" = 'Ravi');
+CREATE TEMP TABLE t_loans AS
+  SELECT l."Id" FROM "Loans" l JOIN "Lenders" le ON le."Id" = l."LenderId" WHERE le."OwnerName" = 'Ravi';
+DELETE FROM "PaymentReversals" WHERE "PaymentId" IN (SELECT "Id" FROM "Payments" WHERE "LoanId" IN (SELECT "Id" FROM t_loans));
+DELETE FROM "LoanRecasts" WHERE "PaymentId" IN (SELECT "Id" FROM "Payments" WHERE "LoanId" IN (SELECT "Id" FROM t_loans));
+DELETE FROM "PaymentAllocations" WHERE "PaymentId" IN (SELECT "Id" FROM "Payments" WHERE "LoanId" IN (SELECT "Id" FROM t_loans));
+DELETE FROM "Penalties" WHERE "LoanId" IN (SELECT "Id" FROM t_loans);   -- waivers go with their penalties
+DELETE FROM "RepaymentSchedules" WHERE "LoanId" IN (SELECT "Id" FROM t_loans);
+DELETE FROM "Payments" WHERE "LoanId" IN (SELECT "Id" FROM t_loans);
+DELETE FROM "LoanTransactions" WHERE "LoanId" IN (SELECT "Id" FROM t_loans);
+DELETE FROM "Loans" WHERE "Id" IN (SELECT "Id" FROM t_loans);
 COMMIT;
 SQL
 ```
 
 Then run the customer and auth cleanups. Never run this against the seeded lenders.
+
+## Testing the payment API
+
+### Strategy
+
+| Layer | What it proves | How to run |
+|---|---|---|
+| Unit tests (`PaymentAllocationEngineTests`) | Allocation order, partial and advance payments, the payable cap, penalty settlement, prepayment preconditions | `dotnet test KredFlow.slnx --filter "FullyQualifiedName~PaymentAllocationEngine"` |
+| API tests (`PaymentApiTests`, `PaymentReversalApiTests`, `PenaltyApiTests`) | The real HTTP pipeline on in-memory Sqlite: recording, allocation, idempotency, history, reversal rules, penalties, waivers and both closure policies | `dotnet test KredFlow.slnx --filter "FullyQualifiedName~Payment|FullyQualifiedName~Penalty"` |
+| Manual `curl` against PostgreSQL | The migration and backfill, real JSON shapes, concurrency on the loan version, and seeded penalties | This section |
+
+What to verify, in priority order:
+
+1. **Allocation is right.** Interest due, then penalties, then principal due, then advance on upcoming installments; the allocated parts always add up to the amount.
+2. **Nothing posts twice.** The same idempotency key never creates a second payment, and a different request with that key is rejected.
+3. **Nothing is deleted.** A reversal keeps the payment, its allocations and its ledger entries, and every balance returns to what it was.
+4. **Balances are derived.** Outstanding, schedule status and penalty balance move only because allocations, waivers or reversals changed.
+5. **Tenant isolation and roles.** Another lender gets `404` everywhere; only an `Owner` can reverse, assess or waive.
+
+### Setup
+
+Define the helpers from [Testing the loan API](#setup-2) (`B`, `J`, `TODAY`, `BACK`, `C`, `loan`, `pay`) and the tokens `$TA` / `$TB`, then add two small helpers:
+
+```bash
+# Print a payment's allocations compactly
+alloc() { python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["status"], d["amount"], "interest", d["interestAllocated"], "penalty", d["penaltyAllocated"], "principal", d["principalAllocated"]); [print("  ", a["allocationType"], a["installmentNumber"], a["interestAmount"], a["penaltyAmount"], a["principalAmount"]) for a in d["allocations"]]'; }
+
+# Print one JSON field
+field() { python3 -c 'import sys,json; print(json.load(sys.stdin)[sys.argv[1]])' "$1"; }
+```
+
+### 1. Allocation order
+
+A loan that started 95 days ago has three installments past due (interest `1000`, `921.15`, `841.51`). Assess a penalty, then pay the interest, the penalty and `1000` of principal:
+
+```bash
+O=$(loan 100000 12 12 $BACK)
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$O/penalties -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"amount":500,"assessedDate":"'$TODAY'","installmentNumber":1}'                      # expect 201, outstandingAmount 500
+curl -s $B/loans/$O/outstanding -H "Authorization: Bearer $TA"                             # note the figures before paying
+
+R=$(curl -s -X POST $B/loans/$O/payments -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"amount":4262.66,"paymentDate":"'$TODAY'","paymentMethod":"UPI","referenceNumber":"UPI-1","remarks":"EMI","idempotencyKey":"order-1"}')
+echo $R | alloc
+PAY=$(echo $R | field id)
+```
+
+Expected: `Recorded 4262.66 interest 2762.66 penalty 500.00 principal 1000.00`, with installment lines 1, 2 and 3 (interest on all three, principal `1000` on line 1) and then a `Penalty` line of `500`. Check the effect:
+
+```bash
+curl -s $B/loans/$O/outstanding -H "Authorization: Bearer $TA"          # principal 99000, accruedUnpaidInterest 0
+curl -s $B/loans/$O/penalties -H "Authorization: Bearer $TA"            # paidAmount 500, outstandingAmount 0
+psql -U mohanac -d kredflow_advanced_api -c "select \"TransactionType\", \"Amount\" from \"LoanTransactions\" where \"ReferenceId\" = '$PAY';"   # one Repayment entry
+```
+
+### 2. Partial payments, advance and the cap
+
+```bash
+# A payment smaller than the interest due only fills interest, oldest installment first
+P2=$(loan 100000 12 12 $BACK)
+curl -s -X POST $B/loans/$P2/payments -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"amount":100,"paymentDate":"'$TODAY'","paymentMethod":"Cash","idempotencyKey":"'$(uuidgen)'"}' | alloc     # one line: installment 1, interest 100
+
+# With nothing due, the remainder advances upcoming installments (interest before principal); the schedule is not recast
+P3=$(loan 100000 12 12 $TODAY)
+curl -s -X POST $B/loans/$P3/payments -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"amount":8984.88,"paymentDate":"'$TODAY'","paymentMethod":"Cash","idempotencyKey":"'$(uuidgen)'"}' | alloc
+curl -s $B/loans/$P3/schedule -H "Authorization: Bearer $TA" | python3 -c 'import sys,json; [print(r["installmentNumber"], r["paidAmount"], r["remainingAmount"], r["paymentStatus"]) for r in json.load(sys.stdin)[:3]]'
+```
+
+Expected for `$P3`: line 1 is interest `1000` and principal `7884.88`, line 2 is interest `100`; the schedule shows row 1 `Paid`, row 2 `Partial` with `100` paid, row 3 `Upcoming`; `GET /loans/$P3` still shows 12 months and EMI `8884.88`.
+
+The amount can never exceed everything still payable. On a 3-month loan the total payable is the sum of the schedule's `remainingAmount`:
+
+```bash
+P4=$(loan 30000 12 3 $TODAY)
+TOTAL=$(curl -s $B/loans/$P4/schedule -H "Authorization: Bearer $TA" | python3 -c 'import sys,json; print(round(sum(r["remainingAmount"] for r in json.load(sys.stdin)), 2))'); echo $TOTAL
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$P4/payments -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"amount":'$(python3 -c "print(round($TOTAL + 0.01, 2))")',"paymentDate":"'$TODAY'","paymentMethod":"Cash","idempotencyKey":"'$(uuidgen)'"}' | tail -c 200   # expect 422
+curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/loans/$P4/payments -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"amount":'$TOTAL',"paymentDate":"'$TODAY'","paymentMethod":"Cash","idempotencyKey":"'$(uuidgen)'"}'                                  # expect 201
+curl -s $B/loans/$P4/outstanding -H "Authorization: Bearer $TA"                            # principalOutstanding 0
+```
+
+### 3. Validation and dates
+
+| Change to the request | Expected |
+|---|---|
+| `amount` 0, negative, or 3 decimals | `400`, `errors.amount` |
+| `idempotencyKey` missing, empty or over 100 characters | `400`, `errors.idempotencyKey` |
+| `paymentDate` missing | `400` |
+| `paymentDate` tomorrow | `422` |
+| `paymentDate` before the loan start | `422` |
+| `paymentDate` before the last non-reversed payment's date | `422` |
+| Loan is closed | `422` |
+| No token | `401` |
+
+```bash
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$O/payments -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"amount":0,"paymentDate":"'$TODAY'","paymentMethod":"Cash","idempotencyKey":""}'     # expect 400 with errors.amount and errors.idempotencyKey
+```
+
+### 4. Idempotency
+
+```bash
+BODY='{"amount":500,"paymentDate":"'$TODAY'","paymentMethod":"Cash","idempotencyKey":"retry-1"}'
+curl -s -o /dev/null -w 'first  %{http_code}\n' -X POST $B/loans/$O/payments -H "Authorization: Bearer $TA" -H "$J" -d "$BODY"   # 201
+curl -s -o /dev/null -w 'replay %{http_code}\n' -X POST $B/loans/$O/payments -H "Authorization: Bearer $TA" -H "$J" -d "$BODY"   # 200, same payment
+curl -s -o /dev/null -w 'other  %{http_code}\n' -X POST $B/loans/$O/payments -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"amount":600,"paymentDate":"'$TODAY'","paymentMethod":"Cash","idempotencyKey":"retry-1"}'                                 # 409, different content
+psql -U mohanac -d kredflow_advanced_api -c "select count(*) from \"Payments\" where \"LoanId\" = '$O' and \"IdempotencyKey\" = 'retry-1';"   # 1
+```
+
+Three simultaneous payments with different keys on one loan: the loan's version serializes them, so some succeed and any that collide return `409` (for example `201 409 201`). Retrying a `409` with the same key then succeeds, and each key is posted at most once.
+
+```bash
+for i in 1 2 3; do curl -s -o /dev/null -w '%{http_code} ' -X POST $B/loans/$O/payments -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"amount":100,"paymentDate":"'$TODAY'","paymentMethod":"Cash","idempotencyKey":"par-'$i'"}' & done; wait; echo
+```
+
+### 5. History
+
+```bash
+curl -s "$B/loans/$O/payments" -H "Authorization: Bearer $TA"                      # newest first
+curl -s "$B/loans/$O/payments?paymentMethod=UPI" -H "Authorization: Bearer $TA"   # only UPI
+curl -s "$B/loans/$O/payments?status=Reversed" -H "Authorization: Bearer $TA"     # empty until you reverse one
+curl -s "$B/loans/$O/payments?from=$TODAY&to=$TODAY&page=1&pageSize=2" -H "Authorization: Bearer $TA"
+curl -s "$B/customers/$C/payments" -H "Authorization: Bearer $TA"                  # every loan of this customer
+curl -s -w ' [%{http_code}]\n' "$B/loans/$O/payments?pageSize=101" -H "Authorization: Bearer $TA"   # expect 400
+```
+
+`GET $B/payments/$PAY` returns the full payment with its allocations.
+
+### 6. Reverse a payment
+
+```bash
+curl -s $B/loans/$O/outstanding -H "Authorization: Bearer $TA"          # before reversing
+curl -s -w ' [%{http_code}]\n' -X POST $B/payments/$PAY/reversals -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"reason":"Cheque bounced","reversalDate":"'$TODAY'"}' | tail -c 200                      # expect 201, status Reversed
+curl -s $B/loans/$O/outstanding -H "Authorization: Bearer $TA"          # principal and accrued interest are back
+curl -s $B/loans/$O/penalties -H "Authorization: Bearer $TA"            # penalty outstanding is back to 500
+curl -s -w ' [%{http_code}]\n' -X POST $B/payments/$PAY/reversals -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"reason":"again","reversalDate":"'$TODAY'"}' | tail -c 150                               # expect 409
+psql -U mohanac -d kredflow_advanced_api -c "select (select count(*) from \"Payments\" where \"Id\" = '$PAY') as payment, (select count(*) from \"PaymentAllocations\" where \"PaymentId\" = '$PAY') as allocations, (select count(*) from \"PaymentReversals\" where \"PaymentId\" = '$PAY') as reversals, (select string_agg(\"TransactionType\", ',' order by \"TransactionType\") from \"LoanTransactions\" where \"ReferenceId\" = '$PAY') as ledger;"
+```
+
+Expected: the payment row and its allocations still exist, one reversal, ledger `Repayment,Reversal`. The `outstanding` figures after reversal equal those before the payment, except for payments recorded afterwards (the `retry-1` and `par-*` ones keep their own allocations).
+
+| Check | Expected |
+|---|---|
+| Reverse without a `reason`, or a reason over 500 characters | `400` |
+| `reversalDate` tomorrow, or before the payment date | `422` |
+| Reverse as a `Staff` user | `403` |
+| Reverse a payment of another lender (`$TB`) | `404` |
+| Reverse a regular payment while a later prepayment exists | `422` |
+| Reverse a prepayment while any later payment exists | `422` |
+| Reverse a payment of a closed loan | `422` |
+
+**Reversing a prepayment** restores the schedule, EMI and tenure:
+
+```bash
+Q=$(loan 100000 12 12 $TODAY)
+PP=$(curl -s -X POST $B/loans/$Q/prepayments -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"amount":20000,"paymentDate":"'$TODAY'","treatment":"ReduceTenure"}' | field paymentId)
+curl -s $B/loans/$Q -H "Authorization: Bearer $TA" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["tenureMonths"], d["emiAmount"])'     # 10 8884.88
+curl -s -o /dev/null -w '%{http_code}\n' -X POST $B/payments/$PP/reversals -H "Authorization: Bearer $TA" -H "$J" -d '{"reason":"Entered in error","reversalDate":"'$TODAY'"}'   # 201
+curl -s $B/loans/$Q -H "Authorization: Bearer $TA" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["tenureMonths"], d["emiAmount"])'     # 12 8884.88
+psql -U mohanac -d kredflow_advanced_api -c "select \"IsSuperseded\", count(*), min(\"InstallmentNumber\"), max(\"InstallmentNumber\") from \"RepaymentSchedules\" where \"LoanId\" = '$Q' group by 1 order by 1;"
+```
+
+Expected: 12 current rows (numbered 1 to 12) and 10 superseded rows (the ones the recast generated, kept for audit). Prepayments with `ReduceEmi` restore the original EMI the same way.
+
+### 7. Penalties, waivers and closing
+
+```bash
+W=$(loan 30000 12 2 $BACK)
+TOTAL=$(curl -s $B/loans/$W/schedule -H "Authorization: Bearer $TA" | python3 -c 'import sys,json; print(round(sum(r["remainingAmount"] for r in json.load(sys.stdin)), 2))')
+curl -s -o /dev/null -w 'pay all  %{http_code}\n' -X POST $B/loans/$W/payments -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"amount":'$TOTAL',"paymentDate":"'$TODAY'","paymentMethod":"Cash","idempotencyKey":"'$(uuidgen)'"}'    # 201: every installment is settled
+PEN=$(curl -s -X POST $B/loans/$W/penalties -H "Authorization: Bearer $TA" -H "$J" -d '{"amount":100,"assessedDate":"'$TODAY'"}' | field id)
+
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$W/close -H "Authorization: Bearer $TA" -H "$J" -d '{"closureDate":"'$TODAY'"}' | tail -c 200   # expect 422, penalties 100.00
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$W/penalties/$PEN/waivers -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"amount":40,"reason":"Goodwill"}' | tail -c 160                                    # 201, waivedAmount 40, outstandingAmount 60
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$W/penalties/$PEN/waivers -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"amount":60.01,"reason":"Too much"}' | tail -c 200                                 # expect 422, exceeds the outstanding 60.00
+curl -s -o /dev/null -w 'pay penalty %{http_code}\n' -X POST $B/loans/$W/payments -H "Authorization: Bearer $TA" -H "$J" \
+  -d '{"amount":60,"paymentDate":"'$TODAY'","paymentMethod":"Cash","idempotencyKey":"'$(uuidgen)'"}'                      # 201: settles the rest of the penalty
+curl -s $B/loans/$W/penalties -H "Authorization: Bearer $TA"                              # amount 100, paid 60, waived 40, outstanding 0
+curl -s -w ' [%{http_code}]\n' -X POST $B/loans/$W/close -H "Authorization: Bearer $TA" -H "$J" -d '{"closureDate":"'$TODAY'"}' | tail -c 120   # expect 200 Closed
+psql -U mohanac -d kredflow_advanced_api -c "select \"TransactionType\", \"Amount\" from \"LoanTransactions\" where \"LoanId\" = '$W' and \"TransactionType\" in ('Penalty', 'Waiver') order by \"TransactionDate\";"
+```
+
+| Check | Expected |
+|---|---|
+| Waiver `amount` 0, or no `reason` | `400` |
+| Waiver of a penalty id from another loan | `404` |
+| Assess with `amount` 0 or above 10,000,000, `assessedDate` tomorrow, or `installmentNumber` that does not exist | `400` or `422` |
+| Assess or waive as `Staff` | `403` |
+| Assess on a closed loan | `422` |
+
+With `Loans:PenaltyClosurePolicy=IgnorePenalties` (set the environment variable `Loans__PenaltyClosurePolicy=IgnorePenalties` and restart), the first `close` above returns `200`, and the penalty stays listed with `outstandingAmount` `100`: ignoring penalties never erases the balance or the ledger.
+
+### 8. Isolation
+
+```bash
+for u in "GET $O/payments" "GET $O/penalties"; do
+  set -- $u; curl -s -o /dev/null -w "$1 $2 [%{http_code}]\n" -X $1 $B/loans/$2 -H "Authorization: Bearer $TB"
+done                                                                                       # both 404
+curl -s -o /dev/null -w 'get payment [%{http_code}]\n' $B/payments/$PAY -H "Authorization: Bearer $TB"                              # 404
+curl -s -o /dev/null -w 'reverse [%{http_code}]\n' -X POST $B/payments/$PAY/reversals -H "Authorization: Bearer $TB" -H "$J" -d '{"reason":"x","reversalDate":"'$TODAY'"}'   # 404
+curl -s -o /dev/null -w 'pay [%{http_code}]\n' -X POST $B/loans/$O/payments -H "Authorization: Bearer $TB" -H "$J" \
+  -d '{"amount":100,"paymentDate":"'$TODAY'","paymentMethod":"Cash","idempotencyKey":"x"}'                                          # 404
+```
+
+### 9. Seeded penalties (Development only)
+
+The seeder now creates real `Penalty` rows for the missed installments of overdue and defaulted loans. With the `pick` and `tok` helpers from [Seeded loans](#8-seeded-loans-development-only):
+
+```bash
+OV=$(pick Overdue); TO=$(tok $OV)
+curl -s $B/loans/$OV/penalties -H "Authorization: Bearer $TO"            # two penalties, each with outstandingAmount > 0
+curl -s $B/loans/$OV/outstanding -H "Authorization: Bearer $TO"
+curl -s -X POST $B/loans/$OV/payments -H "Authorization: Bearer $TO" -H "$J" \
+  -d '{"amount":5000,"paymentDate":"'$TODAY'","paymentMethod":"UPI","idempotencyKey":"seed-'$RANDOM'"}' | alloc    # interest, then both penalties, then principal
+```
+
+This changes the seeded data (reverse the payment to undo it, or reset the database).
+
+### Clean up
+
+The payments, penalties and reversals belong to the throwaway lenders, so the [loan cleanup](#clean-up-1) removes them (in dependency order) before the customers and lenders.
 
 ## Tests
 
@@ -1359,6 +1771,10 @@ Run only the auth tests with `dotnet test KredFlow.slnx --filter "FullyQualified
 - `AuthEdgeCaseTests` covers rate limiting, startup with a missing signing key or invalid time zone list, transaction rollback, phone normalization and the password policy.
 - `CustomerApiTests` covers the customer API: create, validation, tenant isolation, search and paging, soft deactivation, loan history and outstanding.
 - `LoanCalculatorTests` covers the pure loan maths: EMI, schedule invariants, month-end due dates, prepayment planning and per-installment accrual.
+- `PaymentAllocationEngineTests` covers the allocation rules: order, partial and advance payments, the payable cap, penalties and the prepayment preconditions.
+- `PaymentApiTests` covers recording and allocation, validation and dates, idempotency, history for a loan and a customer, tenant isolation and prepayment integration.
+- `PaymentReversalApiTests` covers reversals: balances restored, nothing deleted, the ordering and closed-loan rules, and restoring a prepayment's schedule, EMI and tenure.
+- `PenaltyApiTests` covers penalty assessment, listing, waivers, owner-only access and both penalty closure policies.
 - `LoanApiTests` covers the loan API: create with schedule and disbursement, ignored client fields, validation, tenant isolation, filters and paging, derived schedule status and outstanding, close rules, and both prepayment treatments.
 - `LenderApiTests` covers the lender profile: read, update, owner-only access, and deactivation (including blocked access afterwards, kept data, and the open-loan rule).
 
@@ -1366,7 +1782,7 @@ Integration tests run with the `Testing` environment, which skips the Developmen
 
 ## Roadmap
 
-- Payment endpoints (regular payments, reversals, partial and excess payments, penalty payment and waiver), reusing the allocation engine from loan prepayments, plus Reporting endpoints, with all queries scoped to the caller's `lenderId`
+- Reporting endpoints (dashboard and portfolio queries), with all queries scoped to the caller's `lenderId`
 - A scheduled job that moves loans to `Overdue` and `Defaulted`; until then `status` is whatever was last stored
 - Refresh tokens (hashed at rest, rotated on use) and logout
 - Staff user management for a lender

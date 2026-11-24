@@ -26,4 +26,5 @@ public class Loan
     public ICollection<RepaymentSchedule> RepaymentSchedules { get; set; } = new List<RepaymentSchedule>();
     public ICollection<Payment> Payments { get; set; } = new List<Payment>();
     public ICollection<LoanTransaction> Transactions { get; set; } = new List<LoanTransaction>();
+    public ICollection<Penalty> Penalties { get; set; } = new List<Penalty>();
 }

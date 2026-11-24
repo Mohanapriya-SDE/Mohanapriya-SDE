@@ -494,31 +494,6 @@ public sealed class LoanApiTests(ApiFactory factory) : IClassFixture<ApiFactory>
     }
 
     [Fact]
-    public async Task Close_WithUnwaivedPenalty_IsBlocked()
-    {
-        var session = await RegisterAndLoginAsync();
-        var loan = await CreateLoanAsync(session, await CreateCustomerAsync(session), months: 2, start: Today().AddDays(-40));
-        await PayInstallmentsAsync(loan.Id, 1, 2);
-        await factory.WithDbAsync(async db =>
-        {
-            db.LoanTransactions.Add(new LoanTransaction { Id = Guid.NewGuid(), LoanId = loan.Id, TransactionType = TransactionType.Penalty, Amount = 100m, TransactionDate = Today() });
-            return await db.SaveChangesAsync();
-        });
-
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, (await SendAsync(HttpMethod.Post, $"{Base}/{loan.Id}/close", session.Token,
-            new CloseLoanRequest { ClosureDate = Today() })).StatusCode);
-
-        await factory.WithDbAsync(async db =>
-        {
-            db.LoanTransactions.Add(new LoanTransaction { Id = Guid.NewGuid(), LoanId = loan.Id, TransactionType = TransactionType.Waiver, Amount = 100m, TransactionDate = Today() });
-            return await db.SaveChangesAsync();
-        });
-
-        Assert.Equal(HttpStatusCode.OK, (await SendAsync(HttpMethod.Post, $"{Base}/{loan.Id}/close", session.Token,
-            new CloseLoanRequest { ClosureDate = Today() })).StatusCode);
-    }
-
-    [Fact]
     public async Task Close_IsOwnerOnly()
     {
         var session = await RegisterAndLoginAsync();

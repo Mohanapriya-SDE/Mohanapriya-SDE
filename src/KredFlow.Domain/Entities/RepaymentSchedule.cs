@@ -14,6 +14,12 @@ public class RepaymentSchedule
     /// <summary>Set when a prepayment recast replaced this row. Rows with allocations are never deleted.</summary>
     public bool IsSuperseded { get; set; }
 
+    /// <summary>The prepayment whose recast generated this row.</summary>
+    public Guid? CreatedByPaymentId { get; set; }
+
+    /// <summary>The prepayment whose recast replaced this row. Cleared if that prepayment is reversed.</summary>
+    public Guid? SupersededByPaymentId { get; set; }
+
     public Loan Loan { get; set; } = null!;
     public ICollection<PaymentAllocation> Allocations { get; set; } = new List<PaymentAllocation>();
 }

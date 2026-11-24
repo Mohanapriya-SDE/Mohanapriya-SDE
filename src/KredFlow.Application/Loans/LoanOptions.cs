@@ -19,4 +19,16 @@ public class LoanOptions
 
     /// <summary>Applied when a loan is created without an explicit policy.</summary>
     public PrepaymentPolicy DefaultPrepaymentPolicy { get; set; } = PrepaymentPolicy.LenderChoice;
+
+    /// <summary>Whether outstanding penalties stop a loan from being closed.</summary>
+    public PenaltyClosurePolicy PenaltyClosurePolicy { get; set; } = PenaltyClosurePolicy.BlockUntilPaidOrWaived;
+}
+
+public enum PenaltyClosurePolicy
+{
+    /// <summary>A loan with an outstanding penalty cannot be closed.</summary>
+    BlockUntilPaidOrWaived,
+
+    /// <summary>The loan can close; its penalties, waivers and ledger entries stay as they are and the balance remains visible.</summary>
+    IgnorePenalties
 }

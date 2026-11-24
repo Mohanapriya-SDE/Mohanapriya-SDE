@@ -261,6 +261,46 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                     b.ToTable("Loans", (string)null);
                 });
 
+            modelBuilder.Entity("KredFlow.Domain.Entities.LoanRecast", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal>("NewEmiAmount")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("numeric(18,2)");
+
+                    b.Property<int>("NewTenureMonths")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("PaymentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal>("PreviousEmiAmount")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("numeric(18,2)");
+
+                    b.Property<int>("PreviousTenureMonths")
+                        .HasColumnType("integer");
+
+                    b.Property<decimal>("PrincipalOutstandingAfter")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("numeric(18,2)");
+
+                    b.Property<string>("Treatment")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PaymentId")
+                        .IsUnique();
+
+                    b.ToTable("LoanRecasts", (string)null);
+                });
+
             modelBuilder.Entity("KredFlow.Domain.Entities.LoanTransaction", b =>
                 {
                     b.Property<Guid>("Id")
@@ -274,6 +314,9 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("LoanId")
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("ReferenceId")
+                        .HasColumnType("uuid");
+
                     b.Property<DateOnly>("TransactionDate")
                         .HasColumnType("date");
 
@@ -285,6 +328,8 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("LoanId");
+
+                    b.HasIndex("ReferenceId");
 
                     b.ToTable("LoanTransactions", (string)null);
                 });
@@ -302,6 +347,13 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<Guid?>("CreatedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("IdempotencyKey")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
                     b.Property<Guid>("LoanId")
                         .HasColumnType("uuid");
 
@@ -313,9 +365,17 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)");
 
+                    b.Property<string>("ReferenceNumber")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
                     b.Property<string>("Remarks")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
+
+                    b.Property<string>("RequestHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
 
                     b.Property<string>("Type")
                         .IsRequired()
@@ -324,7 +384,11 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("LoanId");
+                    b.HasIndex("LoanId", "IdempotencyKey")
+                        .IsUnique()
+                        .HasFilter("\"IdempotencyKey\" IS NOT NULL");
+
+                    b.HasIndex("LoanId", "PaymentDate");
 
                     b.ToTable("Payments", (string)null);
                 });
@@ -340,6 +404,13 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                         .HasColumnType("numeric(18,2)");
 
                     b.Property<Guid>("PaymentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal>("PenaltyAmount")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("numeric(18,2)");
+
+                    b.Property<Guid?>("PenaltyId")
                         .HasColumnType("uuid");
 
                     b.Property<decimal>("PrincipalAmount")
@@ -358,15 +429,116 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("PaymentId");
 
+                    b.HasIndex("PenaltyId");
+
                     b.HasIndex("ScheduleId");
 
                     b.ToTable("PaymentAllocations", (string)null);
+                });
+
+            modelBuilder.Entity("KredFlow.Domain.Entities.PaymentReversal", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("CreatedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("PaymentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<DateOnly>("ReversalDate")
+                        .HasColumnType("date");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PaymentId")
+                        .IsUnique();
+
+                    b.ToTable("PaymentReversals", (string)null);
+                });
+
+            modelBuilder.Entity("KredFlow.Domain.Entities.Penalty", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal>("Amount")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("numeric(18,2)");
+
+                    b.Property<DateOnly>("AssessedDate")
+                        .HasColumnType("date");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("CreatedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("LoanId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("ScheduleId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("LoanId");
+
+                    b.HasIndex("ScheduleId");
+
+                    b.ToTable("Penalties", (string)null);
+                });
+
+            modelBuilder.Entity("KredFlow.Domain.Entities.PenaltyWaiver", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal>("Amount")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("numeric(18,2)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("CreatedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("PenaltyId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PenaltyId");
+
+                    b.ToTable("PenaltyWaivers", (string)null);
                 });
 
             modelBuilder.Entity("KredFlow.Domain.Entities.RepaymentSchedule", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("CreatedByPaymentId")
                         .HasColumnType("uuid");
 
                     b.Property<DateOnly>("DueDate")
@@ -393,11 +565,18 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                         .HasPrecision(18, 2)
                         .HasColumnType("numeric(18,2)");
 
+                    b.Property<Guid?>("SupersededByPaymentId")
+                        .HasColumnType("uuid");
+
                     b.Property<decimal>("TotalDue")
                         .HasPrecision(18, 2)
                         .HasColumnType("numeric(18,2)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("CreatedByPaymentId");
+
+                    b.HasIndex("SupersededByPaymentId");
 
                     b.HasIndex("LoanId", "InstallmentNumber")
                         .IsUnique()
@@ -593,6 +772,17 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                     b.Navigation("Lender");
                 });
 
+            modelBuilder.Entity("KredFlow.Domain.Entities.LoanRecast", b =>
+                {
+                    b.HasOne("KredFlow.Domain.Entities.Payment", "Payment")
+                        .WithOne("Recast")
+                        .HasForeignKey("KredFlow.Domain.Entities.LoanRecast", "PaymentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Payment");
+                });
+
             modelBuilder.Entity("KredFlow.Domain.Entities.LoanTransaction", b =>
                 {
                     b.HasOne("KredFlow.Domain.Entities.Loan", "Loan")
@@ -623,6 +813,11 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.HasOne("KredFlow.Domain.Entities.Penalty", "Penalty")
+                        .WithMany()
+                        .HasForeignKey("PenaltyId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("KredFlow.Domain.Entities.RepaymentSchedule", "Schedule")
                         .WithMany("Allocations")
                         .HasForeignKey("ScheduleId")
@@ -630,16 +825,66 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
 
                     b.Navigation("Payment");
 
+                    b.Navigation("Penalty");
+
                     b.Navigation("Schedule");
+                });
+
+            modelBuilder.Entity("KredFlow.Domain.Entities.PaymentReversal", b =>
+                {
+                    b.HasOne("KredFlow.Domain.Entities.Payment", "Payment")
+                        .WithOne("Reversal")
+                        .HasForeignKey("KredFlow.Domain.Entities.PaymentReversal", "PaymentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("Payment");
+                });
+
+            modelBuilder.Entity("KredFlow.Domain.Entities.Penalty", b =>
+                {
+                    b.HasOne("KredFlow.Domain.Entities.Loan", "Loan")
+                        .WithMany("Penalties")
+                        .HasForeignKey("LoanId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("KredFlow.Domain.Entities.RepaymentSchedule", null)
+                        .WithMany()
+                        .HasForeignKey("ScheduleId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("Loan");
+                });
+
+            modelBuilder.Entity("KredFlow.Domain.Entities.PenaltyWaiver", b =>
+                {
+                    b.HasOne("KredFlow.Domain.Entities.Penalty", "Penalty")
+                        .WithMany("Waivers")
+                        .HasForeignKey("PenaltyId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Penalty");
                 });
 
             modelBuilder.Entity("KredFlow.Domain.Entities.RepaymentSchedule", b =>
                 {
+                    b.HasOne("KredFlow.Domain.Entities.Payment", null)
+                        .WithMany()
+                        .HasForeignKey("CreatedByPaymentId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("KredFlow.Domain.Entities.Loan", "Loan")
                         .WithMany("RepaymentSchedules")
                         .HasForeignKey("LoanId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.HasOne("KredFlow.Domain.Entities.Payment", null)
+                        .WithMany()
+                        .HasForeignKey("SupersededByPaymentId")
+                        .OnDelete(DeleteBehavior.Restrict);
 
                     b.Navigation("Loan");
                 });
@@ -713,6 +958,8 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
                 {
                     b.Navigation("Payments");
 
+                    b.Navigation("Penalties");
+
                     b.Navigation("RepaymentSchedules");
 
                     b.Navigation("Transactions");
@@ -721,6 +968,15 @@ namespace KredFlow.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("KredFlow.Domain.Entities.Payment", b =>
                 {
                     b.Navigation("Allocations");
+
+                    b.Navigation("Recast");
+
+                    b.Navigation("Reversal");
+                });
+
+            modelBuilder.Entity("KredFlow.Domain.Entities.Penalty", b =>
+                {
+                    b.Navigation("Waivers");
                 });
 
             modelBuilder.Entity("KredFlow.Domain.Entities.RepaymentSchedule", b =>

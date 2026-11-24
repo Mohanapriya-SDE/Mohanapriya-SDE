@@ -160,4 +160,73 @@ Content-Type: application/json
   "remarks": "All dues settled"
 }
 
+### Record a payment (interest due, then penalties, then principal due, then upcoming installments)
+# @name recordPayment
+POST {{KredFlow.Api_HostAddress}}/api/v1/loans/{{loanId}}/payments
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "amount": 10000,
+  "paymentDate": "2026-11-24",
+  "paymentMethod": "Cash",
+  "referenceNumber": null,
+  "remarks": "November EMI",
+  "idempotencyKey": "payment-request-unique-001"
+}
+
+###
+@paymentId = {{recordPayment.response.body.id}}
+
+### Get payment (with allocations)
+GET {{KredFlow.Api_HostAddress}}/api/v1/payments/{{paymentId}}
+Authorization: Bearer {{accessToken}}
+
+### Loan payment history
+GET {{KredFlow.Api_HostAddress}}/api/v1/loans/{{loanId}}/payments?status=Recorded&paymentMethod=Cash&from=2026-01-01&to=2026-12-31&page=1&pageSize=20
+Authorization: Bearer {{accessToken}}
+
+### Customer payment history
+GET {{KredFlow.Api_HostAddress}}/api/v1/customers/{{customerId}}/payments?page=1&pageSize=20
+Authorization: Bearer {{accessToken}}
+
+### Reverse a payment (Owner only)
+POST {{KredFlow.Api_HostAddress}}/api/v1/payments/{{paymentId}}/reversals
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "reason": "Cheque bounced",
+  "reversalDate": "2026-11-26"
+}
+
+### Assess a penalty (Owner only)
+# @name assessPenalty
+POST {{KredFlow.Api_HostAddress}}/api/v1/loans/{{loanId}}/penalties
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "amount": 500,
+  "assessedDate": "2026-11-24",
+  "installmentNumber": 1
+}
+
+###
+@penaltyId = {{assessPenalty.response.body.id}}
+
+### List penalties
+GET {{KredFlow.Api_HostAddress}}/api/v1/loans/{{loanId}}/penalties
+Authorization: Bearer {{accessToken}}
+
+### Waive a penalty, fully or partially (Owner only)
+POST {{KredFlow.Api_HostAddress}}/api/v1/loans/{{loanId}}/penalties/{{penaltyId}}/waivers
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "amount": 200,
+  "reason": "Customer hardship"
+}
+
 ###

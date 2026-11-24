@@ -5,6 +5,8 @@ using KredFlow.Application.Customers;
 using KredFlow.Application.Interfaces;
 using KredFlow.Application.Lenders;
 using KredFlow.Application.Loans;
+using KredFlow.Application.Payments;
+using KredFlow.Application.Penalties;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace KredFlow.Application;
@@ -17,6 +19,8 @@ public static class DependencyInjection
         services.AddScoped<ILenderService, LenderService>();
         services.AddScoped<ICustomerService, CustomerService>();
         services.AddScoped<ILoanService, LoanService>();
+        services.AddScoped<IPaymentService, PaymentService>();
+        services.AddScoped<IPenaltyService, PenaltyService>();
         services.AddScoped<ILenderClock, LenderClock>();
         services.AddValidatorsFromAssemblyContaining<RegisterLenderRequestValidator>();
         return services;

@@ -14,21 +14,15 @@ public interface ILoanRepository
     /// <summary>Of the given loans, the ones that ever had a schedule row (current or superseded).</summary>
     Task<HashSet<Guid>> GetLoanIdsWithScheduleAsync(IReadOnlyCollection<Guid> loanIds, CancellationToken cancellationToken = default);
 
-    /// <summary>Tracked current (not superseded) schedule rows with their allocations, in installment order.</summary>
+    /// <summary>Tracked current (not superseded) schedule rows, in installment order, with the allocations of non-reversed payments.</summary>
     Task<IReadOnlyList<RepaymentSchedule>> GetCurrentScheduleAsync(Guid loanId, CancellationToken cancellationToken = default);
 
-    /// <summary>Principal allocated by every payment of the loan, installment and prepayment alike.</summary>
+    /// <summary>Principal allocated by every non-reversed payment of the loan, installment and prepayment alike.</summary>
     Task<decimal> GetPrincipalPaidAsync(Guid loanId, CancellationToken cancellationToken = default);
 
+    /// <summary>The latest payment date among non-reversed payments.</summary>
     Task<DateOnly?> GetLastPaymentDateAsync(Guid loanId, CancellationToken cancellationToken = default);
-
-    /// <summary>Penalty ledger entries minus waivers.</summary>
-    Task<decimal> GetNetPenaltiesAsync(Guid loanId, CancellationToken cancellationToken = default);
 
     /// <summary>Tracks the loan, its schedule and ledger entries; they are persisted by the next save.</summary>
     void Add(Loan loan, IEnumerable<RepaymentSchedule> schedule, LoanTransaction disbursement);
-
-    void AddRows(IEnumerable<RepaymentSchedule> rows);
-
-    void AddPayment(Payment payment, IEnumerable<PaymentAllocation> allocations, LoanTransaction transaction);
 }

@@ -70,7 +70,7 @@ public class LoanRepository(KredFlowDbContext db) : ILoanRepository
 
     public async Task<IReadOnlyList<RepaymentSchedule>> GetCurrentScheduleAsync(Guid loanId, CancellationToken cancellationToken = default) =>
         await db.RepaymentSchedules
-            .Include(s => s.Allocations)
+            .Include(s => s.Allocations.Where(a => a.Payment.Reversal == null))
             .Where(s => s.LoanId == loanId && !s.IsSuperseded)
             .OrderBy(s => s.InstallmentNumber)
             .ToListAsync(cancellationToken);
@@ -78,28 +78,17 @@ public class LoanRepository(KredFlowDbContext db) : ILoanRepository
     // Summed in memory: Sqlite (used in tests) cannot aggregate decimals in SQL.
     public async Task<decimal> GetPrincipalPaidAsync(Guid loanId, CancellationToken cancellationToken = default) =>
         (await db.PaymentAllocations.AsNoTracking()
-            .Where(a => a.Payment.LoanId == loanId)
+            .Where(a => a.Payment.LoanId == loanId && a.Payment.Reversal == null)
             .Select(a => a.PrincipalAmount)
             .ToListAsync(cancellationToken)).Sum();
 
     public async Task<DateOnly?> GetLastPaymentDateAsync(Guid loanId, CancellationToken cancellationToken = default)
     {
         var dates = await db.Payments.AsNoTracking()
-            .Where(p => p.LoanId == loanId)
+            .Where(p => p.LoanId == loanId && p.Reversal == null)
             .Select(p => p.PaymentDate)
             .ToListAsync(cancellationToken);
         return dates.Count == 0 ? null : dates.Max();
-    }
-
-    public async Task<decimal> GetNetPenaltiesAsync(Guid loanId, CancellationToken cancellationToken = default)
-    {
-        var entries = await db.LoanTransactions.AsNoTracking()
-            .Where(t => t.LoanId == loanId
-                        && (t.TransactionType == TransactionType.Penalty || t.TransactionType == TransactionType.Waiver))
-            .Select(t => new { t.TransactionType, t.Amount })
-            .ToListAsync(cancellationToken);
-
-        return entries.Sum(e => e.TransactionType == TransactionType.Penalty ? e.Amount : -e.Amount);
     }
 
     public void Add(Loan loan, IEnumerable<RepaymentSchedule> schedule, LoanTransaction disbursement)
@@ -107,14 +96,5 @@ public class LoanRepository(KredFlowDbContext db) : ILoanRepository
         db.Loans.Add(loan);
         db.RepaymentSchedules.AddRange(schedule);
         db.LoanTransactions.Add(disbursement);
-    }
-
-    public void AddRows(IEnumerable<RepaymentSchedule> rows) => db.RepaymentSchedules.AddRange(rows);
-
-    public void AddPayment(Payment payment, IEnumerable<PaymentAllocation> allocations, LoanTransaction transaction)
-    {
-        db.Payments.Add(payment);
-        db.PaymentAllocations.AddRange(allocations);
-        db.LoanTransactions.Add(transaction);
     }
 }

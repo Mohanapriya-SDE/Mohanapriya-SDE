@@ -20,6 +20,10 @@ public class KredFlowDbContext(DbContextOptions<KredFlowDbContext> options)
     public DbSet<Payment> Payments => Set<Payment>();
     public DbSet<PaymentAllocation> PaymentAllocations => Set<PaymentAllocation>();
     public DbSet<LoanTransaction> LoanTransactions => Set<LoanTransaction>();
+    public DbSet<Penalty> Penalties => Set<Penalty>();
+    public DbSet<PenaltyWaiver> PenaltyWaivers => Set<PenaltyWaiver>();
+    public DbSet<PaymentReversal> PaymentReversals => Set<PaymentReversal>();
+    public DbSet<LoanRecast> LoanRecasts => Set<LoanRecast>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

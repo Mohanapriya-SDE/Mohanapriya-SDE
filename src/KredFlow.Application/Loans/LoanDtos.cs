@@ -97,6 +97,9 @@ public class PrepaymentRequest
     public PaymentMethod? PaymentMethod { get; set; }
 
     public string? Remarks { get; set; }
+
+    /// <summary>Optional. Retrying with the same key returns the original prepayment instead of posting it twice.</summary>
+    public string? IdempotencyKey { get; set; }
 }
 
 public class PrepaymentResponse
@@ -116,3 +119,6 @@ public class PrepaymentResponse
     public decimal EmiAmount { get; set; }
     public int TenureMonths { get; set; }
 }
+
+/// <summary>The outcome of a prepayment. Replayed is true when an earlier request with the same idempotency key was returned.</summary>
+public sealed record PrepaymentResult(PrepaymentResponse Prepayment, bool Replayed);

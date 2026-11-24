@@ -44,11 +44,12 @@ public class DatabaseSeeder(
         var payments = new List<Payment>();
         var allocations = new List<PaymentAllocation>();
         var transactions = new List<LoanTransaction>();
+        var penalties = new List<Penalty>();
 
         for (var i = 0; i < LoanCount; i++)
         {
             var customer = customers[i % customers.Count];
-            BuildLoan(faker, i, customer, today, loans, schedules, payments, allocations, transactions);
+            BuildLoan(faker, i, customer, today, loans, schedules, payments, allocations, transactions, penalties);
         }
 
         db.Lenders.AddRange(lenders);
@@ -58,6 +59,7 @@ public class DatabaseSeeder(
         db.RepaymentSchedules.AddRange(schedules);
         db.Payments.AddRange(payments);
         db.PaymentAllocations.AddRange(allocations);
+        db.Penalties.AddRange(penalties);
         db.LoanTransactions.AddRange(transactions);
 
         await db.SaveChangesAsync(cancellationToken);
@@ -148,7 +150,8 @@ public class DatabaseSeeder(
         List<RepaymentSchedule> schedules,
         List<Payment> payments,
         List<PaymentAllocation> allocations,
-        List<LoanTransaction> transactions)
+        List<LoanTransaction> transactions,
+        List<Penalty> penalties)
     {
         // Scenario cycles: 0 = closed, 1-2 = active on time, 3 = overdue, 4 = defaulted.
         var scenario = index % 5;
@@ -237,18 +240,34 @@ public class DatabaseSeeder(
                     LoanId = loan.Id,
                     TransactionType = TransactionType.Repayment,
                     Amount = payment.Amount,
-                    TransactionDate = paymentDate
+                    TransactionDate = paymentDate,
+                    ReferenceId = payment.Id
                 });
             }
             else
             {
+                // The ledger entry and the penalty share an id, so no extra random values change the seeded ids.
+                var penaltyId = faker.Random.Guid();
+                var penaltyAmount = Math.Round(schedule.TotalDue * PenaltyRate, 2);
+                var assessedDate = Min(schedule.DueDate.AddDays(7), today);
+
+                penalties.Add(new Penalty
+                {
+                    Id = penaltyId,
+                    LoanId = loan.Id,
+                    ScheduleId = schedule.Id,
+                    Amount = penaltyAmount,
+                    AssessedDate = assessedDate,
+                    CreatedAt = assessedDate.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc)
+                });
                 transactions.Add(new LoanTransaction
                 {
-                    Id = faker.Random.Guid(),
+                    Id = penaltyId,
                     LoanId = loan.Id,
                     TransactionType = TransactionType.Penalty,
-                    Amount = Math.Round(schedule.TotalDue * PenaltyRate, 2),
-                    TransactionDate = Min(schedule.DueDate.AddDays(7), today)
+                    Amount = penaltyAmount,
+                    TransactionDate = assessedDate,
+                    ReferenceId = penaltyId
                 });
             }
         }

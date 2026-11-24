@@ -74,14 +74,18 @@ public class LoansController(ILoanService loanService) : ControllerBase
     public async Task<ActionResult<LoanResponse>> Close(Guid loanId, CloseLoanRequest request, CancellationToken cancellationToken) =>
         await loanService.CloseAsync(loanId, request, cancellationToken);
 
-    /// <summary>Posts a prepayment and recasts the remaining schedule according to the loan's prepayment policy.</summary>
+    /// <summary>Posts a prepayment and recasts the remaining schedule according to the loan's prepayment policy. A repeated idempotency key returns 200 with the original.</summary>
     [HttpPost("{loanId:guid}/prepayments")]
     [ProducesResponseType<PrepaymentResponse>(StatusCodes.Status201Created)]
+    [ProducesResponseType<PrepaymentResponse>(StatusCodes.Status200OK)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status400BadRequest)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status404NotFound)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status409Conflict)]
     [ProducesResponseType<ProblemDetails>(StatusCodes.Status422UnprocessableEntity)]
-    public async Task<ActionResult<PrepaymentResponse>> Prepay(Guid loanId, PrepaymentRequest request, CancellationToken cancellationToken) =>
-        StatusCode(StatusCodes.Status201Created, await loanService.PrepayAsync(loanId, request, cancellationToken));
+    public async Task<ActionResult<PrepaymentResponse>> Prepay(Guid loanId, PrepaymentRequest request, CancellationToken cancellationToken)
+    {
+        var result = await loanService.PrepayAsync(loanId, request, cancellationToken);
+        return StatusCode(result.Replayed ? StatusCodes.Status200OK : StatusCodes.Status201Created, result.Prepayment);
+    }
 }

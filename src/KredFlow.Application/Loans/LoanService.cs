@@ -3,6 +3,7 @@ using FluentValidation.Results;
 using KredFlow.Application.Common;
 using KredFlow.Application.Exceptions;
 using KredFlow.Application.Interfaces;
+using KredFlow.Application.Payments;
 using KredFlow.Domain.Entities;
 using KredFlow.Domain.Enums;
 using Microsoft.Extensions.Options;
@@ -11,6 +12,8 @@ namespace KredFlow.Application.Loans;
 
 public class LoanService(
     ILoanRepository loans,
+    IPaymentRepository payments,
+    IPenaltyRepository penalties,
     ICustomerRepository customers,
     IUnitOfWork unitOfWork,
     ICurrentUserService currentUser,
@@ -156,11 +159,15 @@ public class LoanService(
         }
 
         var balance = await CalculateBalanceAsync(loan, request.ClosureDate, cancellationToken);
-        var penalties = Math.Max(0m, await loans.GetNetPenaltiesAsync(loan.Id, cancellationToken));
-        if (balance.PrincipalOutstanding > 0 || balance.AccruedUnpaidInterest > 0 || penalties > 0)
+
+        // Ignoring penalties only skips the check: the penalties, waivers and ledger entries stay exactly as they are.
+        var penaltyOutstanding = _options.PenaltyClosurePolicy == PenaltyClosurePolicy.BlockUntilPaidOrWaived
+            ? (await penalties.GetFiguresAsync(loan.Id, cancellationToken)).Sum(f => f.Outstanding)
+            : 0m;
+        if (balance.PrincipalOutstanding > 0 || balance.AccruedUnpaidInterest > 0 || penaltyOutstanding > 0)
         {
             throw new BusinessRuleException(
-                $"The loan still has dues: principal {balance.PrincipalOutstanding:0.00}, interest {balance.AccruedUnpaidInterest:0.00}, penalties {penalties:0.00}.");
+                $"The loan still has dues: principal {balance.PrincipalOutstanding:0.00}, interest {balance.AccruedUnpaidInterest:0.00}, penalties {penaltyOutstanding:0.00}.");
         }
 
         loan.Status = LoanStatus.Closed;
@@ -172,9 +179,22 @@ public class LoanService(
         return ToResponse(loan, scheduleGenerated: true);
     }
 
-    public async Task<PrepaymentResponse> PrepayAsync(Guid loanId, PrepaymentRequest request, CancellationToken cancellationToken = default)
+    public async Task<PrepaymentResult> PrepayAsync(Guid loanId, PrepaymentRequest request, CancellationToken cancellationToken = default)
     {
         var loan = await LoadAsync(loanId, cancellationToken);
+
+        var key = string.IsNullOrWhiteSpace(request.IdempotencyKey) ? null : request.IdempotencyKey.Trim();
+        var hash = RequestFingerprint.Compute(
+            loan.Id, request.Amount, request.PaymentDate, request.Treatment, request.PaymentMethod, request.Remarks?.Trim());
+        if (key is not null)
+        {
+            var existing = await payments.GetByIdempotencyKeyAsync(loan.Id, key, cancellationToken);
+            if (existing is not null)
+            {
+                return Replay(existing, hash);
+            }
+        }
+
         if (loan.Status == LoanStatus.Closed)
         {
             throw new BusinessRuleException("A closed loan cannot be prepaid.");
@@ -201,8 +221,9 @@ public class LoanService(
 
         var schedule = await loans.GetCurrentScheduleAsync(loan.Id, cancellationToken);
         var principalOutstanding = Math.Max(0m, loan.Principal - await loans.GetPrincipalPaidAsync(loan.Id, cancellationToken));
+        var penaltyOutstanding = (await penalties.GetFiguresAsync(loan.Id, cancellationToken)).Sum(f => f.Outstanding);
         var plan = PaymentAllocationEngine.PlanPrepayment(
-            schedule.Select(ScheduleRowFigures.From).ToList(), principalOutstanding, request.Amount, request.PaymentDate);
+            schedule.Select(ScheduleRowFigures.From).ToList(), principalOutstanding, request.Amount, request.PaymentDate, penaltyOutstanding);
 
         var payment = new Payment
         {
@@ -213,7 +234,10 @@ public class LoanService(
             PaymentMethod = request.PaymentMethod ?? PaymentMethod.Cash,
             Type = PaymentType.Prepayment,
             Remarks = string.IsNullOrWhiteSpace(request.Remarks) ? null : request.Remarks.Trim(),
-            CreatedAt = timeProvider.GetUtcNow().UtcDateTime
+            IdempotencyKey = key,
+            RequestHash = key is null ? null : hash,
+            CreatedAt = timeProvider.GetUtcNow().UtcDateTime,
+            CreatedByUserId = currentUser.UserId
         };
         var allocations = plan.Lines.Select(l => new PaymentAllocation
         {
@@ -230,15 +254,19 @@ public class LoanService(
             LoanId = loan.Id,
             TransactionType = TransactionType.Repayment,
             Amount = request.Amount,
-            TransactionDate = request.PaymentDate
+            TransactionDate = request.PaymentDate,
+            ReferenceId = payment.Id
         };
 
         var replaced = schedule.Where(r => plan.ReplacedRowIds.Contains(r.Id)).ToList();
         var newRows = BuildRecast(loan, treatment, plan, replaced.Count);
 
+        var previousEmi = loan.EmiAmount;
+        var previousTenure = loan.TenureMonths;
         foreach (var row in replaced)
         {
             row.IsSuperseded = true;
+            row.SupersededByPaymentId = payment.Id;
         }
 
         // A full payoff leaves no installments; keep the previous tenure rather than reporting a made-up one.
@@ -247,6 +275,7 @@ public class LoanService(
         {
             loan.TenureMonths = newTenure;
         }
+
         if (treatment == PrepaymentTreatment.ReduceEmi && newRows.Count > 0)
         {
             loan.EmiAmount = LoanCalculator.CalculateEmi(plan.NewPrincipalBalance, loan.AnnualInterestRate, newRows.Count);
@@ -254,16 +283,47 @@ public class LoanService(
 
         loan.Version = Guid.NewGuid();
 
-        await unitOfWork.ExecuteInTransactionAsync(async ct =>
+        var recast = new LoanRecast
         {
-            // Superseding first keeps the partial unique index (current rows only) satisfied when numbers are reused.
-            await unitOfWork.SaveChangesAsync(ct);
-            loans.AddRows(newRows.Select(r => ToEntity(loan.Id, r)));
-            loans.AddPayment(payment, allocations, ledgerEntry);
-            await unitOfWork.SaveChangesAsync(ct);
-        }, cancellationToken);
+            Id = Guid.NewGuid(),
+            PaymentId = payment.Id,
+            Treatment = treatment,
+            PreviousEmiAmount = previousEmi,
+            PreviousTenureMonths = previousTenure,
+            NewEmiAmount = loan.EmiAmount,
+            NewTenureMonths = loan.TenureMonths,
+            PrincipalOutstandingAfter = plan.NewPrincipalBalance
+        };
 
-        return new PrepaymentResponse
+        try
+        {
+            await unitOfWork.ExecuteInTransactionAsync(async ct =>
+            {
+                // The payment and the superseded rows go first: the rows reference the payment, and the partial unique
+                // index (current rows only) must see the old rows as superseded before their numbers are reused.
+                payments.Add(payment, allocations, ledgerEntry, recast);
+                await unitOfWork.SaveChangesAsync(ct);
+                payments.AddRows(newRows.Select(r =>
+                {
+                    var row = ToEntity(loan.Id, r);
+                    row.CreatedByPaymentId = payment.Id;
+                    return row;
+                }));
+                await unitOfWork.SaveChangesAsync(ct);
+            }, cancellationToken);
+        }
+        catch (ConflictException) when (key is not null)
+        {
+            var raced = await payments.GetByIdempotencyKeyAsync(loan.Id, key, cancellationToken);
+            if (raced is not null)
+            {
+                return Replay(raced, hash);
+            }
+
+            throw;
+        }
+
+        return new PrepaymentResult(new PrepaymentResponse
         {
             PaymentId = payment.Id,
             LoanId = loan.Id,
@@ -275,7 +335,31 @@ public class LoanService(
             PrincipalOutstanding = plan.NewPrincipalBalance,
             EmiAmount = loan.EmiAmount,
             TenureMonths = loan.TenureMonths
-        };
+        }, Replayed: false);
+    }
+
+    private static PrepaymentResult Replay(Payment existing, string hash)
+    {
+        if (existing.Type != PaymentType.Prepayment || existing.Recast is null || existing.RequestHash != hash)
+        {
+            throw new ConflictException("The idempotency key was already used for a different request.");
+        }
+
+        var recast = existing.Recast;
+        return new PrepaymentResult(new PrepaymentResponse
+        {
+            PaymentId = existing.Id,
+            LoanId = existing.LoanId,
+            Amount = existing.Amount,
+            PaymentDate = existing.PaymentDate,
+            Treatment = recast.Treatment,
+            InstallmentAmountSettled = existing.Allocations.Where(a => a.Type == AllocationType.Installment)
+                .Sum(a => a.InterestAmount + a.PrincipalAmount),
+            PrincipalPrepaid = existing.Allocations.Where(a => a.Type == AllocationType.PrincipalPrepayment).Sum(a => a.PrincipalAmount),
+            PrincipalOutstanding = recast.PrincipalOutstandingAfter,
+            EmiAmount = recast.NewEmiAmount,
+            TenureMonths = recast.NewTenureMonths
+        }, Replayed: true);
     }
 
     // ReduceTenure keeps the EMI and clears the balance sooner; ReduceEmi keeps the remaining count and lowers the EMI.

@@ -12,6 +12,7 @@ public class LoanTransactionConfiguration : IEntityTypeConfiguration<LoanTransac
         builder.HasKey(x => x.Id);
         builder.Property(x => x.Amount).HasPrecision(18, 2);
         builder.Property(x => x.TransactionType).HasConversion<string>().HasMaxLength(20);
+        builder.HasIndex(x => x.ReferenceId);
 
         builder.HasOne(x => x.Loan)
             .WithMany(x => x.Transactions)

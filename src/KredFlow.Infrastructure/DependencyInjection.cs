@@ -20,6 +20,8 @@ public static class DependencyInjection
         services.AddScoped<ILenderRepository, LenderRepository>();
         services.AddScoped<ICustomerRepository, CustomerRepository>();
         services.AddScoped<ILoanRepository, LoanRepository>();
+        services.AddScoped<IPaymentRepository, PaymentRepository>();
+        services.AddScoped<IPenaltyRepository, PenaltyRepository>();
         services.AddScoped<IUnitOfWork, UnitOfWork>();
         services.TryAddSingleton(TimeProvider.System);
 

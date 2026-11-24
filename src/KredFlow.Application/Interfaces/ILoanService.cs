@@ -17,5 +17,5 @@ public interface ILoanService
 
     Task<LoanResponse> CloseAsync(Guid loanId, CloseLoanRequest request, CancellationToken cancellationToken = default);
 
-    Task<PrepaymentResponse> PrepayAsync(Guid loanId, PrepaymentRequest request, CancellationToken cancellationToken = default);
+    Task<PrepaymentResult> PrepayAsync(Guid loanId, PrepaymentRequest request, CancellationToken cancellationToken = default);
 }

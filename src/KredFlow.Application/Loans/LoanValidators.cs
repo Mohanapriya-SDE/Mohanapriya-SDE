@@ -61,5 +61,6 @@ public class PrepaymentRequestValidator : AbstractValidator<PrepaymentRequest>
         RuleFor(x => x.Treatment).IsInEnum();
         RuleFor(x => x.PaymentMethod).IsInEnum();
         RuleFor(x => x.Remarks).MaximumLength(500);
+        RuleFor(x => x.IdempotencyKey).MaximumLength(100);
     }
 }

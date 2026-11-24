@@ -20,6 +20,19 @@ public class RepaymentScheduleConfiguration : IEntityTypeConfiguration<Repayment
             .IsUnique()
             .HasFilter("\"IsSuperseded\" = false");
 
+        builder.HasIndex(x => x.SupersededByPaymentId);
+        builder.HasIndex(x => x.CreatedByPaymentId);
+
+        builder.HasOne<Payment>()
+            .WithMany()
+            .HasForeignKey(x => x.CreatedByPaymentId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne<Payment>()
+            .WithMany()
+            .HasForeignKey(x => x.SupersededByPaymentId)
+            .OnDelete(DeleteBehavior.Restrict);
+
         builder.HasOne(x => x.Loan)
             .WithMany(x => x.RepaymentSchedules)
             .HasForeignKey(x => x.LoanId)

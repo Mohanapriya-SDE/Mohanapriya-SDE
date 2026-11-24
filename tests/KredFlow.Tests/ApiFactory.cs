@@ -172,3 +172,16 @@ public sealed class MissingSigningKeyApiFactory : ApiFactory
         }
     }
 }
+
+public sealed class IgnorePenaltiesApiFactory : ApiFactory
+{
+    protected override Dictionary<string, string?> Settings
+    {
+        get
+        {
+            var settings = base.Settings;
+            settings["Loans:PenaltyClosurePolicy"] = "IgnorePenalties";
+            return settings;
+        }
+    }
+}
